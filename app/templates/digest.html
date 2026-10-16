@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ digest.title }}{% endblock %}
+{% block content %}
+<article>
+  <header class="digest-header">
+    <p class="eyebrow">{{ digest.digest_date }} · VERSION {{ digest.version }}</p>
+    <h1>{{ digest.title }}</h1>
+    <p class="lead">{{ digest.overview }}</p>
+    <p class="muted">覆盖：{{ digest.coverage_start }} 至 {{ digest.coverage_end }}</p>
+  </header>
+  {% for category, items in grouped.items() %}
+    <section class="news-section">
+      <div class="section-heading"><h2>{{ category }}</h2><span>{{ items|length }} 条</span></div>
+      {% for item in items %}
+        <article class="news-card">
+          <div class="news-meta"><span class="badge">{{ item.event_status }}</span><span>{{ item.article.source_name }}</span>{% if item.article.published_at %}<span>{{ item.article.published_at }}</span>{% endif %}</div>
+          <h3><a href="{{ item.article.canonical_url }}" target="_blank" rel="noopener noreferrer">{{ item.generated_title }}</a></h3>
+          <p>{{ item.generated_summary }}</p>
+          <p class="reason"><strong>为何值得关注：</strong>{{ item.recommendation_reason }}</p>
+          <div class="news-footer">
+            <span>相关度 {{ '%.0f'|format(item.relevance_score) }}</span>
+            <form method="post" action="/feedback" class="inline-form">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="article_id" value="{{ item.article_id }}">
+              <input type="hidden" name="digest_id" value="{{ digest.id }}">
+              <button name="feedback_type" value="bookmark" type="submit">收藏</button>
+              <button name="feedback_type" value="not_interested" type="submit">不感兴趣</button>
+            </form>
+          </div>
+        </article>
+      {% endfor %}
+    </section>
+  {% endfor %}
+</article>
+{% endblock %}
+

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}注册 · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">START YOUR DAILY BRIEF</p>
+  <h1>创建订阅账户</h1>
+  <p class="muted">注册后设置主题、关键词、生成时间和新闻数量。</p>
+  {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="/register" class="stack-form">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <label>邮箱<input type="email" name="email" required autocomplete="email"></label>
+    <label>密码<input type="password" name="password" minlength="8" required autocomplete="new-password"></label>
+    <button class="primary" type="submit">注册</button>
+  </form>
+  <p class="muted">已有账户？<a href="/login">返回登录</a></p>
+</section>
+{% endblock %}
+

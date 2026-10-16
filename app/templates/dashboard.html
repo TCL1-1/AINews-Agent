@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">DAILY SIGNAL, NOT NOISE</p>
+    <h1>你的 AI 垂直资讯台</h1>
+    <p>事实、趋势和已确认的未来事件，分开呈现并保留原始来源。</p>
+  </div>
+  <form method="post" action="/run-now">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <button class="primary" type="submit">立即生成简报</button>
+  </form>
+</section>
+
+<section>
+  <div class="section-heading"><h2>最近任务</h2></div>
+  <div class="job-strip">
+    {% for job in jobs %}
+      <a class="job-chip status-{{ job.status|lower }}" href="/jobs/{{ job.id }}">
+        <span>{{ job.job_type }}</span><strong>{{ job.status }}</strong>
+      </a>
+    {% else %}
+      <p class="empty">尚未运行 Agent。</p>
+    {% endfor %}
+  </div>
+</section>
+
+<section>
+  <div class="section-heading"><h2>历史简报</h2><a href="/preferences">调整订阅偏好 →</a></div>
+  <div class="digest-grid">
+    {% for digest in digests %}
+      <a class="digest-card" href="/digests/{{ digest.id }}">
+        <span class="date">{{ digest.digest_date }} · v{{ digest.version }}</span>
+        <h3>{{ digest.title }}</h3>
+        <p>{{ digest.overview[:150] }}{% if digest.overview|length > 150 %}…{% endif %}</p>
+        <span class="count">{{ digest.items|length }} 条资讯</span>
+      </a>
+    {% else %}
+      <div class="empty-card"><h3>还没有简报</h3><p>点击“立即生成简报”，Agent 会自主搜索并筛选新闻。</p></div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
+

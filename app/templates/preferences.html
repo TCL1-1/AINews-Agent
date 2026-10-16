@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}订阅偏好 · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="page-header">
+  <p class="eyebrow">PERSONALIZE YOUR SIGNAL</p>
+  <h1>订阅偏好</h1>
+  <p class="muted">使用中文逗号或英文逗号分隔多个值。</p>
+</section>
+{% if request.query_params.get('saved') %}<p class="success">设置已保存。</p>{% endif %}
+<form method="post" action="/preferences" class="settings-card">
+  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+  <label>关注领域
+    <textarea name="topics" rows="2">{{ preference.topics|join('，') }}</textarea>
+    <small>建议：LLM、AI Agent、半导体、芯片、自动驾驶、机器人</small>
+  </label>
+  <div class="two-column">
+    <label>关注关键词
+      <textarea name="keywords" rows="3">{{ preference.keywords|join('，') }}</textarea>
+    </label>
+    <label>排除关键词
+      <textarea name="excluded_keywords" rows="3">{{ preference.excluded_keywords|join('，') }}</textarea>
+    </label>
+  </div>
+  <div class="three-column">
+    <label>每天生成时间<input type="time" name="schedule_time" value="{{ preference.schedule_time.strftime('%H:%M') }}"></label>
+    <label>覆盖时长（小时）<input type="number" min="6" max="168" name="coverage_hours" value="{{ preference.coverage_hours }}"></label>
+    <label>最多新闻条数<input type="number" min="3" max="30" name="max_items" value="{{ preference.max_items }}"></label>
+  </div>
+  <label class="check"><input type="checkbox" name="weekend_enabled" {% if preference.weekend_enabled %}checked{% endif %}> 周末也生成</label>
+  <label class="check"><input type="checkbox" name="enabled" {% if preference.enabled %}checked{% endif %}> 启用自动简报</label>
+  <button class="primary" type="submit">保存设置</button>
+</form>
+{% endblock %}
+

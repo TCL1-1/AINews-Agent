@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ai_news
+      POSTGRES_USER: ai_news
+      POSTGRES_PASSWORD: local-development-only
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_news -d ai_news"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://ai_news:local-development-only@db:5432/ai_news
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - runtime_data:/app/runtime
+
+  scheduler:
+    build: .
+    command: ["python", "-m", "app.scheduler"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://ai_news:local-development-only@db:5432/ai_news
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - runtime_data:/app/runtime
+
+volumes:
+  postgres_data:
+  runtime_data:
+

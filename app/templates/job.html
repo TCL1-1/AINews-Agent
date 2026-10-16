@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}任务 {{ job.id }} · {{ app_name }}{% endblock %}
+{% block content %}
+{% if job.status in ['PENDING', 'RUNNING'] %}<meta http-equiv="refresh" content="5">{% endif %}
+<section class="page-header">
+  <p class="eyebrow">AGENT RUN #{{ job.id }}</p>
+  <h1>任务状态：{{ job.status }}</h1>
+  <p class="muted">类型 {{ job.job_type }} · 已尝试 {{ job.attempt_count }} 次</p>
+</section>
+{% if job.status in ['PENDING', 'RUNNING'] %}
+  <div class="progress-card"><div class="spinner"></div><div><h3>Agent 正在自主执行</h3><p>搜索、读取、核验、去重和工具调用可能需要几分钟。本页每 5 秒刷新。</p></div></div>
+{% elif job.status == 'SUCCEEDED' and digest %}
+  <div class="success"><strong>简报已经生成。</strong> <a href="/digests/{{ digest.id }}">查看简报 →</a></div>
+{% elif job.status == 'FAILED' %}
+  <div class="alert"><strong>{{ job.error_code or '运行失败' }}</strong><br>{{ job.error_message }}</div>
+{% endif %}
+{% if run %}
+  <section>
+    <div class="section-heading"><h2>工具调用时间线</h2><span>{{ run.tool_call_count }} 次</span></div>
+    <div class="timeline">
+      {% for call in run.tool_calls %}
+        <div class="news-card">
+          <div class="news-meta"><span>#{{ call.sequence_number }}</span><strong>{{ call.tool_name }}</strong><span>{{ call.status }}</span><span>{{ call.duration_ms or 0 }} ms</span></div>
+          {% if call.status == 'FAILED' %}<p class="alert">{{ call.result_summary }}</p>{% endif %}
+        </div>
+      {% else %}
+        <p class="empty">尚无工具调用记录。</p>
+      {% endfor %}
+    </div>
+  </section>
+{% endif %}
+<p><a href="/">← 返回首页</a></p>
+{% endblock %}
+
