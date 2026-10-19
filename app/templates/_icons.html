@@ -1,0 +1,19 @@
+{% macro icon(name, class_name='icon') -%}
+<svg class="{{ class_name }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  {% if name == 'home' %}<path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/>
+  {% elif name == 'digest' %}<path d="M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M8 8h8M8 12h8M8 16h5"/>
+  {% elif name == 'source' %}<circle cx="12" cy="12" r="2"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7"/>
+  {% elif name == 'activity' %}<path d="M3 12h4l2-7 4 14 2-7h6"/>
+  {% elif name == 'settings' %}<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 8.97 4.6 1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/>
+  {% elif name == 'logout' %}<path d="M10 17l5-5-5-5M15 12H3"/><path d="M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5"/>
+  {% elif name == 'sparkles' %}<path d="m12 3-1.2 3.1A7 7 0 0 1 6.9 10L4 11l2.9 1a7 7 0 0 1 3.9 3.9L12 19l1.2-3.1a7 7 0 0 1 3.9-3.9l2.9-1-2.9-1a7 7 0 0 1-3.9-3.9L12 3Z"/><path d="m19 17-.5 1.2a3 3 0 0 1-1.3 1.3L16 20l1.2.5a3 3 0 0 1 1.3 1.3L19 23l.5-1.2a3 3 0 0 1 1.3-1.3L22 20l-1.2-.5a3 3 0 0 1-1.3-1.3L19 17Z"/>
+  {% elif name == 'calendar' %}<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>
+  {% elif name == 'bookmark' %}<path d="M6 3h12v18l-6-4-6 4V3Z"/>
+  {% elif name == 'clock' %}<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+  {% elif name == 'arrow-right' %}<path d="M5 12h14M13 6l6 6-6 6"/>
+  {% elif name == 'external' %}<path d="M14 3h7v7M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+  {% elif name == 'check' %}<path d="m5 12 4 4L19 6"/>
+  {% elif name == 'menu' %}<path d="M4 6h16M4 12h16M4 18h16"/>
+  {% endif %}
+</svg>
+{%- endmacro %}

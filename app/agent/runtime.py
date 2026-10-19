@@ -61,10 +61,36 @@ class AgentRuntime:
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": build_user_prompt(preferences, coverage_start, coverage_end),
+                "content": build_user_prompt(
+                    preferences,
+                    coverage_start,
+                    coverage_end,
+                    tool_budgets={
+                        "total": self.settings.agent_max_tool_calls,
+                        "search_news": self.settings.agent_max_search_calls,
+                        "fetch_article": self.settings.agent_max_fetch_calls,
+                        "reserved_for_save_and_push": (
+                            self.settings.agent_reserved_final_calls
+                        ),
+                        "target_unique_candidates": (
+                            self.settings.agent_search_target_candidates
+                        ),
+                    },
+                    integrations={
+                        "twitterapi_x_search": bool(self.settings.twitterapi_api_key),
+                    },
+                ),
             },
         ]
         call_signatures: dict[str, int] = {}
+        tool_counts: dict[str, int] = {}
+        discovered_urls: set[str] = set()
+        search_modes_used: set[str] = set()
+        twitterapi_x_search_used = False
+        require_twitterapi_x_search = bool(self.settings.twitterapi_api_key)
+        consecutive_searches_without_new_urls = 0
+        policy_rejections = 0
+        audit_sequence = self.run_record.tool_call_count
         saved_digest_id: int | None = None
         pushed_to_in_app = False
 
@@ -91,8 +117,6 @@ class AgentRuntime:
                     )
 
                 for call in message.tool_calls:
-                    if self.run_record.tool_call_count >= self.settings.agent_max_tool_calls:
-                        raise RuntimeError("Agent exceeded the tool call budget")
                     name = call.function.name
                     try:
                         arguments = json.loads(call.function.arguments or "{}")
@@ -112,12 +136,55 @@ class AgentRuntime:
                         )
                         continue
 
+                    remaining_calls = (
+                        self.settings.agent_max_tool_calls - self.run_record.tool_call_count
+                    )
+                    policy_error: str | None = None
+                    if (
+                        name == "save_digest"
+                        and require_twitterapi_x_search
+                        and not twitterapi_x_search_used
+                        and tool_counts.get("search_news", 0)
+                        < self.settings.agent_max_search_calls
+                        and remaining_calls > self.settings.agent_reserved_final_calls
+                    ):
+                        policy_error = (
+                            "TwitterAPI X coverage is still missing. Before saving, call "
+                            "search_news with mode='platform' and platforms=['x']; use the result "
+                            "only as a lead and verify important claims."
+                        )
+                    elif name not in {"save_digest", "push_digest"} and (
+                        remaining_calls <= self.settings.agent_reserved_final_calls
+                    ):
+                        policy_error = (
+                            "Finalization budget is reserved. Stop discovery and call save_digest, "
+                            "then push_digest(channel='in_app')."
+                        )
+                    elif name == "search_news" and tool_counts.get(name, 0) >= (
+                        self.settings.agent_max_search_calls
+                    ):
+                        policy_error = (
+                            "Search budget exhausted. Use the best verified candidates "
+                            "already found; "
+                            "do not search again. Missing categories may be disclosed in warnings."
+                        )
+                    elif name == "fetch_article" and tool_counts.get(name, 0) >= (
+                        self.settings.agent_max_fetch_calls
+                    ):
+                        policy_error = (
+                            "Article fetch budget exhausted. Finish with verified material already "
+                            "available and disclose coverage gaps in warnings."
+                        )
+                    elif self.run_record.tool_call_count >= self.settings.agent_max_tool_calls:
+                        raise RuntimeError("Agent exceeded the tool call budget")
+
                     arguments_key = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
                     signature = f"{name}:{arguments_key}"
                     call_signatures[signature] = call_signatures.get(signature, 0) + 1
+                    audit_sequence += 1
                     audit = ToolCall(
                         run_id=self.run_record.id,
-                        sequence_number=self.run_record.tool_call_count + 1,
+                        sequence_number=audit_sequence,
                         tool_name=name,
                         arguments_redacted=_redact(arguments),
                         status="RUNNING",
@@ -126,11 +193,91 @@ class AgentRuntime:
                     self.db.commit()
                     started = datetime.now(UTC)
                     try:
-                        if call_signatures[signature] > 2:
-                            raise RuntimeError("duplicate tool call loop detected")
-                        result = await self.registry.execute(name, arguments, self.context)
-                        audit.status = "SUCCEEDED"
-                        if name == "save_digest" and isinstance(result, dict):
+                        if policy_error:
+                            policy_rejections += 1
+                            result = {
+                                "ok": False,
+                                "blocked_by_policy": True,
+                                "error": policy_error,
+                                "remaining_total_calls": remaining_calls,
+                            }
+                            audit.status = "REJECTED"
+                            audit.error_code = "ToolBudgetPolicy"
+                            if policy_rejections > 3:
+                                raise RuntimeError("Agent ignored tool budget guidance repeatedly")
+                        else:
+                            if call_signatures[signature] > 2:
+                                raise RuntimeError("duplicate tool call loop detected")
+                            result = await self.registry.execute(name, arguments, self.context)
+                            audit.status = "SUCCEEDED"
+                            tool_counts[name] = tool_counts.get(name, 0) + 1
+
+                        if name == "search_news" and not policy_error and isinstance(result, dict):
+                            search_mode = str(arguments.get("mode", "hybrid"))
+                            search_modes_used.add(search_mode)
+                            requested_platforms = arguments.get("platforms")
+                            if search_mode == "platform" and (
+                                requested_platforms is None
+                                or (
+                                    isinstance(requested_platforms, list)
+                                    and "x" in requested_platforms
+                                )
+                            ):
+                                twitterapi_x_search_used = True
+                            candidate_urls = {
+                                str(candidate.get("url"))
+                                for candidate in result.get("candidates", [])
+                                if isinstance(candidate, dict) and candidate.get("url")
+                            }
+                            new_urls = candidate_urls - discovered_urls
+                            discovered_urls.update(candidate_urls)
+                            if new_urls:
+                                consecutive_searches_without_new_urls = 0
+                            else:
+                                consecutive_searches_without_new_urls += 1
+                            search_count = tool_counts.get("search_news", 0)
+                            stop_reasons: list[str] = []
+                            if search_count >= self.settings.agent_max_search_calls:
+                                stop_reasons.append("search_call_limit_reached")
+                            if len(discovered_urls) >= (
+                                self.settings.agent_search_target_candidates
+                            ) and (not require_twitterapi_x_search or twitterapi_x_search_used):
+                                stop_reasons.append("enough_unique_candidates")
+                            if (
+                                consecutive_searches_without_new_urls >= 2
+                                and search_count >= 4
+                                and (not require_twitterapi_x_search or twitterapi_x_search_used)
+                            ):
+                                stop_reasons.append("two_searches_without_new_urls")
+                            missing_required_searches = []
+                            if require_twitterapi_x_search and not twitterapi_x_search_used:
+                                missing_required_searches.append("platform:x")
+                            result["search_policy"] = {
+                                "search_calls_used": search_count,
+                                "search_calls_limit": self.settings.agent_max_search_calls,
+                                "new_urls_this_call": len(new_urls),
+                                "unique_urls_discovered": len(discovered_urls),
+                                "modes_used": sorted(search_modes_used),
+                                "missing_required_searches": missing_required_searches,
+                                "stop_search": bool(stop_reasons),
+                                "stop_reasons": stop_reasons,
+                                "next_action": (
+                                    "Stop searching. Fetch and verify the strongest "
+                                    "candidates, then "
+                                    "save and push the digest."
+                                    if stop_reasons
+                                    else (
+                                        "Before stopping, call search_news with mode='platform' "
+                                        "and platforms=['x'] because TwitterAPI is configured."
+                                        if missing_required_searches
+                                        else (
+                                            "Search may continue only if an important preference "
+                                            "lacks coverage."
+                                        )
+                                    )
+                                ),
+                            }
+                        if name == "save_digest" and not policy_error and isinstance(result, dict):
                             saved_digest_id = int(result["digest_id"])
                         if (
                             name == "push_digest"
@@ -148,7 +295,8 @@ class AgentRuntime:
                     audit.duration_ms = int((finished - started).total_seconds() * 1000)
                     serialized = json.dumps(result, ensure_ascii=False, default=str)
                     audit.result_summary = serialized[:2000]
-                    self.run_record.tool_call_count += 1
+                    if not policy_error:
+                        self.run_record.tool_call_count += 1
                     self.db.commit()
                     messages.append(
                         {

@@ -145,14 +145,32 @@ def build_tool_registry() -> ToolRegistry:
     registry.register(
         ToolSpec(
             "search_news",
-            "从配置的可信 RSS 新闻源中搜索指定主题和时间范围的候选新闻。",
+            (
+                "通过固定可信 RSS 与开放网络新闻索引搜索候选新闻。mode=hybrid 同时搜索，"
+                "rss 仅搜索固定源，web 搜索开放网络，official 仅搜索官方域名，"
+                "platform 搜索 X、Reddit、GitHub、ChatGPT 和 YouTube 的公开内容。"
+                "结果包含可信等级、相关性评分和评分明细；搜索结果仍需正文核验。"
+            ),
             object_schema(
                 {
                     "query": {"type": "string"},
                     "start_time": {"type": "string", "format": "date-time"},
                     "end_time": {"type": "string", "format": "date-time"},
                     "sources": {"type": "array", "items": {"type": "string"}},
+                    "domains": {"type": "array", "items": {"type": "string"}},
+                    "platforms": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["x", "reddit", "github", "chatgpt", "youtube"],
+                        },
+                    },
                     "language": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["hybrid", "rss", "web", "official", "platform"],
+                        "default": "hybrid",
+                    },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
                 ["query", "start_time", "end_time"],
@@ -243,4 +261,3 @@ def build_tool_registry() -> ToolRegistry:
         )
     )
     return registry
-

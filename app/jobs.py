@@ -167,4 +167,3 @@ def dispatch_due_jobs() -> None:
             run_job_sync(job_id)
         except Exception:
             continue
-

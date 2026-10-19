@@ -10,10 +10,12 @@ DeepSeek 模型会自主决定工具调用顺序，搜索、读取、去重并�
 
 - 注册、登录和 Session 认证
 - 主题、关键词、排除词、生成时间和条数配置
-- 10 个受控 Agent 工具
+- 11 个受控 Agent 工具
 - DeepSeek Chat Completions Function Calling 循环
 - 工具预算、超时、重复调用检测和审计轨迹
-- RSS 多来源搜索、正文抓取、SSRF 防护和历史去重
+- RSS + 开放网络混合搜索、模型公司官网检索、候选评分和历史去重
+- X、Reddit、GitHub、ChatGPT、YouTube 公开内容发现（社区内容按低可信线索处理）
+- 分阶段工具预算、搜索停止条件、正文抓取和 SSRF 防护
 - 按主题栏目和事件状态生成简报
 - 站内推送、邮件适配器和推送幂等
 - 手动生成、每日调度、历史简报和用户反馈
@@ -130,6 +132,26 @@ uv run mypy app
 ## 配置
 
 运行配置位于 `.env`，示例字段见 `.env.example`。`.env` 已被 Git 忽略。
+默认 `WEB_SEARCH_PROVIDER=auto`，优先使用 GDELT DOC 新闻索引，结果不足、限流或超时时
+由 DuckDuckGo 与 Bing 补充；GitHub 和 Reddit 还会使用公开检索入口。
+`search_news` 支持 `hybrid`、`rss`、`web`、`official` 和 `platform` 五种模式。
+
+### TwitterAPI.io 密钥
+
+在项目根目录的 `.env` 中找到下面这一行，把密钥粘贴到等号后：
+
+```dotenv
+TWITTERAPI_API_KEY=你的_api_key
+```
+
+密钥只由服务端读取，不会写入页面或日志。配置后，`platform` 模式会优先通过
+TwitterAPI.io 搜索 X 的公开内容；未配置时继续使用现有公开网页检索作为降级方案。
+`.env.example` 中保留了同名空占位，便于部署时对照配置。
+
+如果本机使用 Clash/TUN 的 Fake-IP 模式，且公开域名被解析到 `198.18.0.0/15`，可在
+`.env` 中设置 `ALLOW_PROXY_FAKE_IP=true`。该开关只放行这一段代理保留地址；回环、局域网
+和其他非公网地址仍会被正文抓取的 SSRF 防护拒绝。修改 `.env` 后需要重启 Web 服务。
+
 正式部署前至少需要：
 
 - 轮换已经暴露过的 DeepSeek API 密钥。

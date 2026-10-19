@@ -1,28 +1,75 @@
+{% from "_icons.html" import icon %}
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111b18">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="/">AI News Agent</a>
-    {% if user %}
-      <nav>
-        <a href="/">简报</a>
-        <a href="/preferences">订阅偏好</a>
-        <form action="/logout" method="post" class="inline-form">
-          <input type="hidden" name="csrf" value="{{ csrf_token }}">
-          <button class="link-button" type="submit">退出</button>
-        </form>
+<body class="{% if user %}app-body{% else %}auth-body{% endif %}">
+  {% if user %}
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand-lockup" href="/" aria-label="AI News Agent 首页">
+        <span class="brand-mark">N</span>
+        <span><strong>NEWSROOM</strong><small>AI INTELLIGENCE</small></span>
+      </a>
+      <nav class="side-nav" aria-label="主导航">
+        <p class="nav-label">工作台</p>
+        <a class="{% if request.url.path == '/' %}active{% endif %}" href="/">{{ icon('home') }}<span>概览</span></a>
+        <a class="{% if request.url.path.startswith('/digests') %}active{% endif %}" href="{% if latest_digest_id %}/digests/{{ latest_digest_id }}{% else %}/{% endif %}">{{ icon('digest') }}<span>每日简报</span></a>
+        <p class="nav-label nav-label-secondary">设置</p>
+        <a class="{% if request.url.path == '/preferences' %}active{% endif %}" href="/preferences">{{ icon('settings') }}<span>订阅偏好</span></a>
       </nav>
-    {% endif %}
+      <div class="sidebar-footer">
+        <div class="user-chip">
+          <span class="avatar">{{ user.email[:1]|upper }}</span>
+          <span><strong>{{ user.email.split('@')[0] }}</strong><small>{{ user.email }}</small></span>
+        </div>
+        <form action="/logout" method="post">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <button class="icon-button" type="submit" title="退出登录">{{ icon('logout') }}</button>
+        </form>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="app-topbar">
+        <div>
+          <span class="topbar-kicker">AI NEWS AGENT</span>
+          <strong>{% block page_name %}工作台{% endblock %}</strong>
+        </div>
+        <div class="topbar-actions">
+          <span class="live-pill"><i></i> 系统在线</span>
+          <a class="topbar-avatar" href="/preferences" aria-label="账户设置">{{ user.email[:1]|upper }}</a>
+          <details class="mobile-menu">
+            <summary>{{ icon('menu') }}</summary>
+            <nav>
+              <a href="/">概览</a>
+              <a href="{% if latest_digest_id %}/digests/{{ latest_digest_id }}{% else %}/{% endif %}">每日简报</a>
+              <a href="/preferences">订阅偏好</a>
+            </nav>
+          </details>
+        </div>
+      </header>
+      <main class="page-container">
+  {% else %}
+  <header class="public-topbar">
+    <a class="brand-lockup dark" href="/">
+      <span class="brand-mark">N</span>
+      <span><strong>NEWSROOM</strong><small>AI INTELLIGENCE</small></span>
+    </a>
   </header>
-  <main class="container">
+  <main class="auth-shell">
+  {% endif %}
     {% block content %}{% endblock %}
   </main>
+  {% if user %}
+    </div>
+  </div>
+  {% endif %}
 </body>
 </html>
 

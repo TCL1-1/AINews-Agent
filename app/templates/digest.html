@@ -1,10 +1,11 @@
 {% extends "base.html" %}
-{% block title %}{{ digest.title }}{% endblock %}
+{% block title %}{{ display_title(digest.title) }}{% endblock %}
+{% block page_name %}每日简报{% endblock %}
 {% block content %}
 <article>
   <header class="digest-header">
     <p class="eyebrow">{{ digest.digest_date }} · VERSION {{ digest.version }}</p>
-    <h1>{{ digest.title }}</h1>
+    <h1>{{ display_title(digest.title) }}</h1>
     <p class="lead">{{ digest.overview }}</p>
     <p class="muted">覆盖：{{ digest.coverage_start }} 至 {{ digest.coverage_end }}</p>
   </header>

@@ -25,6 +25,24 @@ def test_all_tools_have_closed_object_schemas() -> None:
         assert parameters["additionalProperties"] is False
 
 
+def test_search_tool_exposes_official_and_platform_modes() -> None:
+    search_tool = next(
+        tool
+        for tool in build_tool_registry().api_tools()
+        if tool["function"]["name"] == "search_news"
+    )
+    properties = search_tool["function"]["parameters"]["properties"]
+    assert "official" in properties["mode"]["enum"]
+    assert "platform" in properties["mode"]["enum"]
+    assert properties["platforms"]["items"]["enum"] == [
+        "x",
+        "reddit",
+        "github",
+        "chatgpt",
+        "youtube",
+    ]
+
+
 def test_save_digest_exposes_resolvable_nested_schema() -> None:
     save_tool = next(
         tool
@@ -36,4 +54,3 @@ def test_save_digest_exposes_resolvable_nested_schema() -> None:
     assert parameters["properties"]["digest"]["properties"]["items"]["items"]["$ref"] == (
         "#/$defs/DigestItemDraft"
     )
-

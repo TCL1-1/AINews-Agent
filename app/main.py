@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import time
+from datetime import datetime, time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -18,12 +20,29 @@ from app.auth import current_user, hash_password, login_user, logout_user, verif
 from app.config import BASE_DIR, get_settings
 from app.database import SessionLocal, get_db, init_db
 from app.jobs import create_job, run_job_sync
-from app.models import AgentRun, Digest, DigestJob, PreferenceProfile, User, UserFeedback
+from app.models import (
+    AgentRun,
+    Digest,
+    DigestItem,
+    DigestJob,
+    PreferenceProfile,
+    User,
+    UserFeedback,
+)
 from app.seed import seed_sources
 from app.tools.x_accounts import normalize_x_handles
 
 settings = get_settings()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
+
+
+def display_title(value: str) -> str:
+    """Hide trailing editorial/debug qualifiers from user-facing digest titles."""
+    title = value.strip()
+    suffix = re.compile(r"\s*[（(][^()（）]*[）)]\s*$")
+    while suffix.search(title):
+        title = suffix.sub("", title).rstrip()
+    return title
 
 
 @asynccontextmanager
@@ -62,10 +81,21 @@ def check_csrf(request: Request, submitted: str) -> None:
 
 
 def context(request: Request, db: Session, **extra: object) -> dict[str, object]:
+    user = current_user(request, db)
+    latest_digest_id = None
+    if user is not None:
+        latest_digest_id = db.scalar(
+            select(Digest.id)
+            .where(Digest.user_id == user.id)
+            .order_by(Digest.digest_date.desc(), Digest.version.desc())
+            .limit(1)
+        )
     return {
         "request": request,
         "app_name": settings.app_name,
-        "user": current_user(request, db),
+        "display_title": display_title,
+        "user": user,
+        "latest_digest_id": latest_digest_id,
         "csrf_token": csrf_token(request),
         **extra,
     }
@@ -104,16 +134,45 @@ def dashboard(request: Request, db: Session = Depends(get_db)) -> Response:
         .order_by(Digest.digest_date.desc(), Digest.version.desc())
         .limit(30)
     ).all()
-    jobs = db.scalars(
-        select(DigestJob)
-        .where(DigestJob.user_id == user.id)
-        .order_by(DigestJob.created_at.desc())
-        .limit(10)
-    ).all()
+    digest_count = db.scalar(select(func.count(Digest.id)).where(Digest.user_id == user.id)) or 0
+    article_count = (
+        db.scalar(
+            select(func.count(DigestItem.id))
+            .join(Digest, DigestItem.digest_id == Digest.id)
+            .where(Digest.user_id == user.id)
+        )
+        or 0
+    )
+    bookmark_count = (
+        db.scalar(
+            select(func.count(UserFeedback.id)).where(
+                UserFeedback.user_id == user.id,
+                UserFeedback.feedback_type == "bookmark",
+            )
+        )
+        or 0
+    )
+    try:
+        local_now = datetime.now(ZoneInfo(user.timezone))
+    except ZoneInfoNotFoundError:
+        local_now = datetime.now(ZoneInfo(settings.default_timezone))
+    greeting = "早上好" if local_now.hour < 12 else "下午好" if local_now.hour < 18 else "晚上好"
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        context(request, db, digests=digests, jobs=jobs, active_job=active_job),
+        context(
+            request,
+            db,
+            digests=digests,
+            latest_digest=digests[0] if digests else None,
+            digest_count=digest_count,
+            article_count=article_count,
+            bookmark_count=bookmark_count,
+            preference=user.preference,
+            local_now=local_now,
+            greeting=greeting,
+            active_job=active_job,
+        ),
     )
 
 
@@ -287,9 +346,7 @@ def job_detail(job_id: int, request: Request, db: Session = Depends(get_db)) -> 
     if job is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     run = db.scalar(
-        select(AgentRun)
-        .where(AgentRun.job_id == job.id)
-        .order_by(AgentRun.started_at.desc())
+        select(AgentRun).where(AgentRun.job_id == job.id).order_by(AgentRun.started_at.desc())
     )
     digest = db.scalar(select(Digest).where(Digest.run_id == run.id)) if run else None
     return templates.TemplateResponse(

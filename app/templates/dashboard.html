@@ -1,43 +1,92 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{% block page_name %}情报工作台{% endblock %}
 {% block content %}
-<section class="hero">
-  <div>
-    <p class="eyebrow">DAILY SIGNAL, NOT NOISE</p>
-    <h1>你的 AI 垂直资讯台</h1>
-    <p>事实、趋势和已确认的未来事件，分开呈现并保留原始来源。</p>
+<section class="dashboard-intro">
+  <div class="intro-copy">
+    <p class="eyebrow">{{ local_now.strftime('%Y.%m.%d') }} · DAILY INTELLIGENCE</p>
+    <h1>{{ greeting }}，今天关注什么？</h1>
+    <p>把开放网络、官方发布和社区信号汇成一份可核验的 AI 情报简报。</p>
   </div>
   <form method="post" action="/run-now">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
-    <button class="primary" type="submit">{% if active_job %}返回生成页面{% else %}立即生成简报{% endif %}</button>
+    <button class="primary action-button" type="submit">
+      {{ icon('sparkles') }}
+      {% if active_job %}返回生成页面{% else %}立即生成简报{% endif %}
+    </button>
   </form>
 </section>
 
-<section>
-  <div class="section-heading"><h2>最近任务</h2></div>
-  <div class="job-strip">
-    {% for job in jobs %}
-      <a class="job-chip status-{{ job.status|lower }}" href="/jobs/{{ job.id }}">
-        <span>{{ job.job_type }}</span><strong>{{ job.status }}</strong>
-      </a>
+<section class="feature-grid">
+  <article class="latest-brief panel">
+    <div class="panel-heading">
+      <div><p class="eyebrow">LATEST BRIEF</p><h2>最新简报</h2></div>
+      {% if latest_digest %}<a class="text-link" href="/digests/{{ latest_digest.id }}">完整阅读 {{ icon('arrow-right') }}</a>{% endif %}
+    </div>
+    {% if latest_digest %}
+      <div class="brief-cover">
+        <div class="brief-date"><strong>{{ latest_digest.digest_date.strftime('%d') }}</strong><span>{{ latest_digest.digest_date.strftime('%Y.%m') }}</span></div>
+        <div class="brief-copy">
+          <span class="meta-line">VERSION {{ latest_digest.version }} · {{ latest_digest.items|length }} 条资讯</span>
+          <h3>{{ display_title(latest_digest.title) }}</h3>
+          <p>{{ latest_digest.overview[:210] }}{% if latest_digest.overview|length > 210 %}…{% endif %}</p>
+        </div>
+      </div>
+      <div class="headline-list">
+        {% for item in latest_digest.items[:3] %}
+          <a href="/digests/{{ latest_digest.id }}">
+            <span class="rank">0{{ loop.index }}</span>
+            <span><small>{{ item.category }} · {{ item.article.source_name }}</small><strong>{{ item.generated_title }}</strong></span>
+            {{ icon('arrow-right') }}
+          </a>
+        {% endfor %}
+      </div>
     {% else %}
-      <p class="empty">尚未运行 Agent。</p>
-    {% endfor %}
-  </div>
+      <div class="empty-state">
+        <span class="empty-orbit">{{ icon('sparkles') }}</span>
+        <h3>第一份简报正在等你</h3>
+        <p>Agent 会自主检索、核验、去重，并保留每条资讯的原始来源。</p>
+      </div>
+    {% endif %}
+  </article>
+
+  <aside class="signal-panel panel">
+    <div class="panel-heading compact"><div><p class="eyebrow">YOUR SIGNAL</p><h2>订阅雷达</h2></div><a class="icon-button light" href="/preferences">{{ icon('settings') }}</a></div>
+    <div class="schedule-block">
+      <span class="schedule-icon">{{ icon('calendar') }}</span>
+      <div><small>下一轮自动简报</small><strong>{% if preference and preference.enabled %}每天 {{ preference.schedule_time.strftime('%H:%M') }}{% else %}自动简报已暂停{% endif %}</strong><span>{{ user.timezone }} · {% if preference and preference.weekend_enabled %}包含周末{% else %}仅工作日{% endif %}</span></div>
+    </div>
+    <div class="divider"></div>
+    <p class="field-label">重点主题</p>
+    <div class="topic-cloud">
+      {% if preference and preference.topics %}
+        {% for topic in preference.topics[:7] %}<span>{{ topic }}</span>{% endfor %}
+      {% else %}
+        <span>LLM</span><span>AI Agent</span><span>半导体</span>
+      {% endif %}
+    </div>
+    <div class="radar-note">
+      <span>{{ icon('check') }}</span>
+      <p><strong>信号优先</strong><small>事实、趋势和未来事件会被分开呈现。</small></p>
+    </div>
+  </aside>
 </section>
 
-<section>
-  <div class="section-heading"><h2>历史简报</h2><a href="/preferences">调整订阅偏好 →</a></div>
-  <div class="digest-grid">
-    {% for digest in digests %}
-      <a class="digest-card" href="/digests/{{ digest.id }}">
-        <span class="date">{{ digest.digest_date }} · v{{ digest.version }}</span>
-        <h3>{{ digest.title }}</h3>
-        <p>{{ digest.overview[:150] }}{% if digest.overview|length > 150 %}…{% endif %}</p>
-        <span class="count">{{ digest.items|length }} 条资讯</span>
-      </a>
-    {% else %}
-      <div class="empty-card"><h3>还没有简报</h3><p>点击“立即生成简报”，Agent 会自主搜索并筛选新闻。</p></div>
-    {% endfor %}
+<section class="archive-section">
+  <div class="panel">
+    <div class="panel-heading"><div><p class="eyebrow">ARCHIVE</p><h2>历史简报</h2></div><span class="subtle">最近 {{ digests|length }} 份</span></div>
+    <div class="archive-list">
+      {% for digest in digests[:6] %}
+        <a href="/digests/{{ digest.id }}">
+          <span class="archive-date"><strong>{{ digest.digest_date.strftime('%m.%d') }}</strong><small>{{ digest.digest_date.strftime('%Y') }}</small></span>
+          <span class="archive-main"><strong>{{ display_title(digest.title) }}</strong><small>{{ digest.overview[:88] }}{% if digest.overview|length > 88 %}…{% endif %}</small></span>
+          <span class="archive-count">{{ digest.items|length }} 条</span>
+          {{ icon('arrow-right') }}
+        </a>
+      {% else %}
+        <div class="empty-row">暂无历史简报。生成后会自动归档在这里。</div>
+      {% endfor %}
+    </div>
   </div>
 </section>
 {% endblock %}
