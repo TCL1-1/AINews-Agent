@@ -7,8 +7,11 @@ import ipaddress
 import math
 import re
 import socket
+from collections.abc import Awaitable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
+from time import perf_counter
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlsplit
 
@@ -323,10 +326,7 @@ def _platform_search_query(query: str) -> str:
 
 
 def _official_search_query(query: str) -> str:
-    return (
-        f"{query.strip()} "
-        "(news OR announcement OR release OR blog OR 新闻 OR 发布 OR 更新)"
-    )
+    return f"{query.strip()} (news OR announcement OR release OR blog OR 新闻 OR 发布 OR 更新)"
 
 
 def _decode_bing_result_url(url: str) -> str:
@@ -493,12 +493,11 @@ def _twitterapi_candidate(
         return None
     author_value = tweet.get("author")
     author: dict[str, Any] = author_value if isinstance(author_value, dict) else {}
-    username = str(
-        author.get("userName")
-        or author.get("username")
-        or tweet.get("userName")
-        or ""
-    ).strip().lstrip("@")
+    username = (
+        str(author.get("userName") or author.get("username") or tweet.get("userName") or "")
+        .strip()
+        .lstrip("@")
+    )
     link = str(
         tweet.get("url")
         or tweet.get("twitterUrl")
@@ -510,17 +509,13 @@ def _twitterapi_candidate(
         )
     ).strip()
     published_at = _parse_twitterapi_datetime(
-        str(
-            tweet.get("createdAt")
-            or tweet.get("created_at")
-            or tweet.get("date")
-            or ""
-        )
+        str(tweet.get("createdAt") or tweet.get("created_at") or tweet.get("date") or "")
     )
     if published_at and not (start <= published_at <= end):
         return None
     compact_text = " ".join(text.split())
     author_label = f"@{username}" if username else "X"
+
     def count_value(*names: str) -> int:
         for name in names:
             try:
@@ -604,6 +599,341 @@ def _configured_feeds(context: ToolContext) -> list[dict[str, Any]]:
     ]
 
 
+@dataclass(slots=True)
+class _ProviderResult:
+    name: str
+    candidates: list[dict[str, Any]]
+    errors: list[str]
+    duration_ms: int
+
+    def metric(self) -> dict[str, Any]:
+        status = "succeeded"
+        if self.errors:
+            status = "partial" if self.candidates else "failed"
+        return {
+            "provider": self.name,
+            "status": status,
+            "duration_ms": self.duration_ms,
+            "candidate_count": len(self.candidates),
+            "error_count": len(self.errors),
+        }
+
+
+async def _candidate_operation(
+    operation: Awaitable[list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    return await operation, []
+
+
+async def _timed_provider(
+    name: str,
+    operation: Awaitable[tuple[list[dict[str, Any]], list[str]]],
+) -> _ProviderResult:
+    started = perf_counter()
+    try:
+        candidates, errors = await operation
+    except (httpx.HTTPError, OSError, ValueError, TypeError) as exc:
+        candidates = []
+        errors = [f"{name}: {type(exc).__name__}: {str(exc)[:160]}"]
+    return _ProviderResult(
+        name=name,
+        candidates=candidates,
+        errors=errors,
+        duration_ms=int((perf_counter() - started) * 1000),
+    )
+
+
+async def _search_rss_feed(
+    client: httpx.AsyncClient,
+    feed: dict[str, Any],
+    terms: list[str],
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    response = await client.get(feed["url"])
+    response.raise_for_status()
+    parsed = feedparser.parse(response.content)
+    candidates: list[dict[str, Any]] = []
+    for entry in parsed.entries:
+        title = str(entry.get("title", "")).strip()
+        link = str(entry.get("link", "")).strip()
+        summary_html = str(entry.get("summary", entry.get("description", "")))
+        summary = BeautifulSoup(summary_html, "html.parser").get_text(" ", strip=True)
+        published_at = _entry_datetime(entry)
+        haystack = f"{title} {summary}".lower()
+        matches = sum(term in haystack for term in terms)
+        required_matches = max(1, math.ceil(len(terms) * 0.4))
+        if matches < required_matches:
+            continue
+        if published_at and not (start <= published_at <= end):
+            continue
+        if not title or not link:
+            continue
+        feed_domain = urlsplit(feed["url"]).netloc
+        candidates.append(
+            {
+                "title": title,
+                "url": canonicalize_url(link),
+                "source": feed["name"],
+                "source_domain": feed_domain,
+                "published_at": published_at.isoformat() if published_at else None,
+                "snippet": summary[:1000],
+                "language": feed["language"],
+                "source_category": feed["category"],
+                "provider": "rss",
+                "configured_trust": int(feed.get("trust_level", 4)),
+            }
+        )
+    return candidates
+
+
+async def _search_gdelt_provider(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    query: str,
+    start: datetime,
+    end: datetime,
+    requested_domains: list[str],
+    safe_domains: list[str],
+    language: str | None,
+    mode: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    _validate_search_endpoint(endpoint)
+    gdelt_query = query.strip()
+    if safe_domains:
+        domain_query = " OR ".join(f"domain:{domain}" for domain in safe_domains[:8])
+        gdelt_query = f"{gdelt_query} ({domain_query})"
+    language_names = {"en": "english", "zh": "chinese"}
+    if language in language_names:
+        gdelt_query = f"{gdelt_query} sourcelang:{language_names[language]}"
+    response = await client.get(
+        endpoint,
+        params={
+            "query": gdelt_query,
+            "mode": "ArtList",
+            "format": "json",
+            "maxrecords": min(max(limit * 3, 25), 250),
+            "sort": "DateDesc",
+            "startdatetime": start.strftime("%Y%m%d%H%M%S"),
+            "enddatetime": end.strftime("%Y%m%d%H%M%S"),
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    articles = payload.get("articles", []) if isinstance(payload, dict) else []
+    candidates: list[dict[str, Any]] = []
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        title = BeautifulSoup(str(article.get("title", "")), "html.parser").get_text(
+            " ", strip=True
+        )
+        link = str(article.get("url", "")).strip()
+        domain = str(article.get("domain") or urlsplit(link).netloc)
+        published_at = _parse_gdelt_datetime(str(article.get("seendate", "")))
+        if not title or not link:
+            continue
+        if published_at and not (start <= published_at <= end):
+            continue
+        if mode == "official" and not _domain_matches(domain, set(requested_domains)):
+            continue
+        candidates.append(
+            {
+                "title": title,
+                "url": canonicalize_url(link),
+                "source": domain,
+                "source_domain": domain,
+                "published_at": published_at.isoformat() if published_at else None,
+                "snippet": title,
+                "language": str(article.get("language", language or "unknown")),
+                "source_category": (
+                    "官方来源" if _domain_matches(domain, OFFICIAL_DOMAINS) else "联网新闻"
+                ),
+                "provider": "gdelt_web_search",
+                "source_country": article.get("sourcecountry"),
+            }
+        )
+    return candidates
+
+
+async def _search_duckduckgo_provider(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    query: str,
+    safe_domains: list[str],
+    language: str | None,
+    mode: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    _validate_search_endpoint(endpoint)
+    if mode == "platform":
+        search_query_text = _platform_search_query(query)
+    elif mode == "official":
+        search_query_text = _official_search_query(query)
+    else:
+        search_query_text = query.strip()
+    ddg_queries = [search_query_text]
+    if mode in {"official", "platform"} and safe_domains:
+        ddg_queries = [f"{search_query_text} site:{domain}" for domain in safe_domains]
+    elif safe_domains:
+        site_query = " OR ".join(f"site:{domain}" for domain in safe_domains)
+        ddg_queries = [f"{search_query_text} ({site_query})"]
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def fetch_search_page(ddg_query: str) -> httpx.Response:
+        async with semaphore:
+            return await client.get(endpoint, params={"q": ddg_query, "kl": "wt-wt"})
+
+    responses: list[Any] = await asyncio.gather(
+        *(fetch_search_page(ddg_query) for ddg_query in ddg_queries),
+        return_exceptions=True,
+    )
+    candidates: list[dict[str, Any]] = []
+    errors: list[str] = []
+    per_query_limit = (
+        max(2, math.ceil(limit / len(ddg_queries))) if len(ddg_queries) > 1 else limit * 2
+    )
+    for response in responses:
+        if isinstance(response, BaseException):
+            errors.append(f"web/duckduckgo: {type(response).__name__}: {str(response)[:120]}")
+            continue
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            errors.append(f"web/duckduckgo: {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        soup = BeautifulSoup(response.text, "html.parser")
+        query_result_count = 0
+        for result_node in soup.select(".result"):
+            anchor = result_node.select_one("a.result__a")
+            if anchor is None:
+                continue
+            title = anchor.get_text(" ", strip=True)
+            link = str(anchor.get("href", "")).strip()
+            if link.startswith("//"):
+                link = f"https:{link}"
+            redirect = urlsplit(link)
+            if _domain_matches(redirect.netloc, {"duckduckgo.com"}):
+                target = parse_qs(redirect.query).get("uddg", [])
+                if target:
+                    link = target[0]
+            parsed_link = urlsplit(link)
+            domain = parsed_link.netloc.lower().removeprefix("www.")
+            if parsed_link.scheme not in {"http", "https"} or not domain:
+                continue
+            if safe_domains and not _domain_matches(domain, set(safe_domains)):
+                continue
+            platform_name = _platform_for_domain(domain)
+            snippet_node = result_node.select_one(".result__snippet")
+            snippet = snippet_node.get_text(" ", strip=True) if snippet_node is not None else ""
+            candidates.append(
+                {
+                    "title": title,
+                    "url": canonicalize_url(link),
+                    "source": domain,
+                    "source_domain": domain,
+                    "published_at": None,
+                    "date_unverified": True,
+                    "snippet": snippet[:1000],
+                    "language": language or "unknown",
+                    "source_category": (
+                        "社区平台"
+                        if platform_name
+                        else "官方来源"
+                        if _domain_matches(domain, OFFICIAL_DOMAINS)
+                        else "联网网页"
+                    ),
+                    "provider": (
+                        "duckduckgo_platform_search" if platform_name else "duckduckgo_web_search"
+                    ),
+                    "platform": platform_name,
+                    "configured_trust": (
+                        PLATFORM_TRUST_LEVELS[platform_name] if platform_name else None
+                    ),
+                }
+            )
+            query_result_count += 1
+            if query_result_count >= per_query_limit:
+                break
+    return candidates, errors
+
+
+async def _search_bing_provider(
+    endpoint: str,
+    query: str,
+    safe_domains: list[str],
+    language: str | None,
+    limit: int,
+    timeout: httpx.Timeout,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    _validate_search_endpoint(endpoint)
+    search_query_text = _platform_search_query(query)
+    bing_queries = [f"{search_query_text} site:{domain}" for domain in safe_domains]
+    candidates: list[dict[str, Any]] = []
+    errors: list[str] = []
+    async with httpx.AsyncClient(
+        timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}
+    ) as bing_client:
+        semaphore = asyncio.Semaphore(4)
+
+        async def fetch_bing_page(bing_query: str) -> httpx.Response:
+            async with semaphore:
+                return await bing_client.get(endpoint, params={"q": bing_query, "count": 15})
+
+        responses: list[Any] = await asyncio.gather(
+            *(fetch_bing_page(query_text) for query_text in bing_queries),
+            return_exceptions=True,
+        )
+    per_query_limit = max(2, math.ceil(limit / max(len(bing_queries), 1)))
+    for response in responses:
+        if isinstance(response, BaseException):
+            errors.append(f"web/bing: {type(response).__name__}: {str(response)[:120]}")
+            continue
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            errors.append(f"web/bing: {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        response.encoding = "utf-8"
+        soup = BeautifulSoup(response.text, "html.parser")
+        query_result_count = 0
+        for result_node in soup.select("li.b_algo"):
+            anchor = result_node.select_one("h2 a")
+            if anchor is None:
+                continue
+            title = anchor.get_text(" ", strip=True)
+            link = _decode_bing_result_url(str(anchor.get("href", "")).strip())
+            parsed_link = urlsplit(link)
+            domain = parsed_link.netloc.lower().removeprefix("www.")
+            platform_name = _platform_for_domain(domain)
+            if parsed_link.scheme not in {"http", "https"} or not domain or platform_name is None:
+                continue
+            snippet_node = result_node.select_one(".b_caption p")
+            snippet = snippet_node.get_text(" ", strip=True) if snippet_node is not None else ""
+            candidates.append(
+                {
+                    "title": title,
+                    "url": canonicalize_url(link),
+                    "source": domain,
+                    "source_domain": domain,
+                    "published_at": None,
+                    "date_unverified": True,
+                    "snippet": snippet[:1000],
+                    "language": language or "unknown",
+                    "source_category": "社区平台",
+                    "provider": "bing_platform_search",
+                    "platform": platform_name,
+                    "configured_trust": PLATFORM_TRUST_LEVELS[platform_name],
+                }
+            )
+            query_result_count += 1
+            if query_result_count >= per_query_limit:
+                break
+    return candidates, errors
+
+
 async def search_news(
     context: ToolContext,
     query: str,
@@ -634,57 +964,24 @@ async def search_news(
     ]
     candidates: list[dict[str, Any]] = []
     errors: list[str] = []
+    provider_metrics: list[dict[str, Any]] = []
     timeout = httpx.Timeout(15.0, connect=8.0)
     async with httpx.AsyncClient(timeout=timeout, headers={"User-Agent": USER_AGENT}) as client:
+        searches: list[Awaitable[_ProviderResult]] = []
+        searches_consumed = False
         if mode in {"hybrid", "rss"}:
-            for feed in feeds:
-                try:
-                    response = await client.get(feed["url"])
-                    response.raise_for_status()
-                    parsed = feedparser.parse(response.content)
-                    for entry in parsed.entries:
-                        title = str(entry.get("title", "")).strip()
-                        link = str(entry.get("link", "")).strip()
-                        summary_html = str(entry.get("summary", entry.get("description", "")))
-                        summary = BeautifulSoup(summary_html, "html.parser").get_text(
-                            " ", strip=True
-                        )
-                        published_at = _entry_datetime(entry)
-                        haystack = f"{title} {summary}".lower()
-                        matches = sum(term in haystack for term in terms)
-                        required_matches = max(1, math.ceil(len(terms) * 0.4))
-                        if matches < required_matches:
-                            continue
-                        if published_at and not (start <= published_at <= end):
-                            continue
-                        if not title or not link:
-                            continue
-                        feed_domain = urlsplit(feed["url"]).netloc
-                        candidates.append(
-                            {
-                                "title": title,
-                                "url": canonicalize_url(link),
-                                "source": feed["name"],
-                                "source_domain": feed_domain,
-                                "published_at": (
-                                    published_at.isoformat() if published_at else None
-                                ),
-                                "snippet": summary[:1000],
-                                "language": feed["language"],
-                                "source_category": feed["category"],
-                                "provider": "rss",
-                                "configured_trust": int(feed.get("trust_level", 4)),
-                            }
-                        )
-                except (httpx.HTTPError, OSError, ValueError) as exc:
-                    errors.append(f"rss/{feed['name']}: {type(exc).__name__}")
+            searches.extend(
+                _timed_provider(
+                    f"rss/{feed['name']}",
+                    _candidate_operation(_search_rss_feed(client, feed, terms, start, end)),
+                )
+                for feed in feeds
+            )
 
         if mode in {"hybrid", "web", "official", "platform"}:
             provider = context.settings.web_search_provider
             if provider not in {"auto", "gdelt", "duckduckgo"}:
-                errors.append(
-                    f"web: unsupported provider {provider!r}"
-                )
+                errors.append(f"web: unsupported provider {provider!r}")
             else:
                 requested_domains = list(domains or [])
                 if mode == "official" and not requested_domains:
@@ -696,352 +993,124 @@ async def search_news(
                     for domain in requested_domains[:14]
                     if re.fullmatch(r"[a-z0-9.-]+", domain.lower().removeprefix("www."))
                 ]
-                web_candidates_before = len(candidates)
-
                 selected_platforms = platforms or list(PLATFORM_DOMAINS)
                 if mode == "platform":
-                    native_searches = []
                     if "x" in selected_platforms and context.settings.twitterapi_api_key:
-                        native_searches.append(
-                            _search_twitterapi(
-                                client,
-                                context.settings.twitterapi_search_url,
-                                context.settings.twitterapi_api_key,
-                                query,
-                                start,
-                                end,
-                                limit,
+                        searches.append(
+                            _timed_provider(
+                                "platform/twitterapi_io",
+                                _candidate_operation(
+                                    _search_twitterapi(
+                                        client,
+                                        context.settings.twitterapi_search_url,
+                                        context.settings.twitterapi_api_key,
+                                        query,
+                                        start,
+                                        end,
+                                        limit,
+                                    )
+                                ),
                             )
                         )
                     if "github" in selected_platforms:
-                        native_searches.append(
-                            _search_github(
-                                client,
-                                context.settings.github_search_url,
-                                query,
-                                start,
-                                end,
-                                limit,
+                        searches.append(
+                            _timed_provider(
+                                "platform/github_api",
+                                _candidate_operation(
+                                    _search_github(
+                                        client,
+                                        context.settings.github_search_url,
+                                        query,
+                                        start,
+                                        end,
+                                        limit,
+                                    )
+                                ),
                             )
                         )
                     if "reddit" in selected_platforms:
-                        native_searches.append(
-                            _search_reddit(
-                                client,
-                                context.settings.reddit_search_url,
-                                query,
-                                start,
-                                end,
-                                limit,
+                        searches.append(
+                            _timed_provider(
+                                "platform/reddit_search_rss",
+                                _candidate_operation(
+                                    _search_reddit(
+                                        client,
+                                        context.settings.reddit_search_url,
+                                        query,
+                                        start,
+                                        end,
+                                        limit,
+                                    )
+                                ),
                             )
                         )
-                    native_results: list[Any] = await asyncio.gather(
-                        *native_searches, return_exceptions=True
-                    )
-                    for native_result in native_results:
-                        if isinstance(native_result, BaseException):
-                            errors.append(
-                                "platform/native: "
-                                f"{type(native_result).__name__}: {str(native_result)[:120]}"
-                            )
-                        else:
-                            candidates.extend(native_result)
 
                 if provider in {"auto", "gdelt"} and mode != "platform":
-                    gdelt_query = query.strip()
-                    if safe_domains:
-                        domain_query = " OR ".join(
-                            f"domain:{domain}" for domain in safe_domains[:8]
+                    searches.append(
+                        _timed_provider(
+                            "web/gdelt",
+                            _candidate_operation(
+                                _search_gdelt_provider(
+                                    client,
+                                    context.settings.gdelt_doc_api_url,
+                                    query,
+                                    start,
+                                    end,
+                                    requested_domains,
+                                    safe_domains,
+                                    language,
+                                    mode,
+                                    limit,
+                                )
+                            ),
                         )
-                        gdelt_query = f"{gdelt_query} ({domain_query})"
-                    language_names = {"en": "english", "zh": "chinese"}
-                    if language in language_names:
-                        gdelt_query = f"{gdelt_query} sourcelang:{language_names[language]}"
-                    params: dict[str, str | int] = {
-                        "query": gdelt_query,
-                        "mode": "ArtList",
-                        "format": "json",
-                        "maxrecords": min(max(limit * 3, 25), 250),
-                        "sort": "DateDesc",
-                        "startdatetime": start.strftime("%Y%m%d%H%M%S"),
-                        "enddatetime": end.strftime("%Y%m%d%H%M%S"),
-                    }
-                    try:
-                        _validate_search_endpoint(context.settings.gdelt_doc_api_url)
-                        response = await client.get(
-                            context.settings.gdelt_doc_api_url, params=params
+                    )
+
+                if provider in {"auto", "duckduckgo"} or mode == "platform":
+                    searches.append(
+                        _timed_provider(
+                            "web/duckduckgo",
+                            _search_duckduckgo_provider(
+                                client,
+                                context.settings.duckduckgo_search_url,
+                                query,
+                                safe_domains,
+                                language,
+                                mode,
+                                limit,
+                            ),
                         )
-                        response.raise_for_status()
-                        payload = response.json()
-                        articles = payload.get("articles", []) if isinstance(payload, dict) else []
-                        for article in articles:
-                            if not isinstance(article, dict):
-                                continue
-                            title = BeautifulSoup(
-                                str(article.get("title", "")), "html.parser"
-                            ).get_text(" ", strip=True)
-                            link = str(article.get("url", "")).strip()
-                            domain = str(article.get("domain") or urlsplit(link).netloc)
-                            published_at = _parse_gdelt_datetime(
-                                str(article.get("seendate", ""))
-                            )
-                            if not title or not link:
-                                continue
-                            if published_at and not (start <= published_at <= end):
-                                continue
-                            if mode == "official" and not _domain_matches(
-                                domain, set(requested_domains)
-                            ):
-                                continue
-                            candidates.append(
-                                {
-                                    "title": title,
-                                    "url": canonicalize_url(link),
-                                    "source": domain,
-                                    "source_domain": domain,
-                                    "published_at": (
-                                        published_at.isoformat() if published_at else None
-                                    ),
-                                    "snippet": title,
-                                    "language": str(
-                                        article.get("language", language or "unknown")
-                                    ),
-                                    "source_category": (
-                                        "官方来源"
-                                        if _domain_matches(domain, OFFICIAL_DOMAINS)
-                                        else "联网新闻"
-                                    ),
-                                    "provider": "gdelt_web_search",
-                                    "source_country": article.get("sourcecountry"),
-                                }
-                            )
-                    except (httpx.HTTPError, OSError, ValueError, TypeError) as exc:
-                        errors.append(f"web/gdelt: {type(exc).__name__}: {str(exc)[:160]}")
+                    )
 
-                web_candidate_count = len(candidates) - web_candidates_before
-                should_use_fallback = provider == "duckduckgo" or mode == "platform" or (
-                    provider == "auto" and web_candidate_count < limit
-                )
-                if should_use_fallback:
-                    try:
-                        _validate_search_endpoint(context.settings.duckduckgo_search_url)
-                        if mode == "platform":
-                            search_query_text = _platform_search_query(query)
-                        elif mode == "official":
-                            search_query_text = _official_search_query(query)
-                        else:
-                            search_query_text = query.strip()
-                        ddg_queries = [search_query_text]
-                        if mode in {"official", "platform"} and safe_domains:
-                            ddg_queries = [
-                                f"{search_query_text} site:{domain}" for domain in safe_domains
-                            ]
-                        elif safe_domains:
-                            site_query = " OR ".join(
-                                f"site:{domain}" for domain in safe_domains
-                            )
-                            ddg_queries = [f"{search_query_text} ({site_query})"]
+                initial_results = await asyncio.gather(*searches)
+                searches_consumed = True
+                for provider_result in initial_results:
+                    candidates.extend(provider_result.candidates)
+                    errors.extend(provider_result.errors)
+                    provider_metrics.append(provider_result.metric())
 
-                        async with httpx.AsyncClient(
-                            timeout=timeout, headers={"User-Agent": USER_AGENT}
-                        ) as fallback_client:
-                            semaphore = asyncio.Semaphore(4)
+                if mode == "platform" and len(candidates) < limit:
+                    bing_result = await _timed_provider(
+                        "web/bing",
+                        _search_bing_provider(
+                            context.settings.bing_search_url,
+                            query,
+                            safe_domains,
+                            language,
+                            limit,
+                            timeout,
+                        ),
+                    )
+                    candidates.extend(bing_result.candidates)
+                    errors.extend(bing_result.errors)
+                    provider_metrics.append(bing_result.metric())
 
-                            async def fetch_search_page(ddg_query: str) -> httpx.Response:
-                                async with semaphore:
-                                    return await fallback_client.get(
-                                        context.settings.duckduckgo_search_url,
-                                        params={"q": ddg_query, "kl": "wt-wt"},
-                                    )
-
-                            responses: list[Any] = await asyncio.gather(
-                                *(fetch_search_page(ddg_query) for ddg_query in ddg_queries),
-                                return_exceptions=True,
-                            )
-                            per_query_limit = (
-                                max(2, math.ceil(limit / len(ddg_queries)))
-                                if len(ddg_queries) > 1
-                                else limit * 2
-                            )
-                            for _ddg_query, response in zip(
-                                ddg_queries, responses, strict=True
-                            ):
-                                if isinstance(response, BaseException):
-                                    errors.append(
-                                        "web/duckduckgo: "
-                                        f"{type(response).__name__}: {str(response)[:120]}"
-                                    )
-                                    continue
-                                try:
-                                    response.raise_for_status()
-                                except httpx.HTTPError as exc:
-                                    errors.append(
-                                        "web/duckduckgo: "
-                                        f"{type(exc).__name__}: {str(exc)[:120]}"
-                                    )
-                                    continue
-                                soup = BeautifulSoup(response.text, "html.parser")
-                                query_result_count = 0
-                                for result_node in soup.select(".result"):
-                                    anchor = result_node.select_one("a.result__a")
-                                    if anchor is None:
-                                        continue
-                                    title = anchor.get_text(" ", strip=True)
-                                    link = str(anchor.get("href", "")).strip()
-                                    if link.startswith("//"):
-                                        link = f"https:{link}"
-                                    redirect = urlsplit(link)
-                                    if _domain_matches(redirect.netloc, {"duckduckgo.com"}):
-                                        target = parse_qs(redirect.query).get("uddg", [])
-                                        if target:
-                                            link = target[0]
-                                    parsed_link = urlsplit(link)
-                                    domain = parsed_link.netloc.lower().removeprefix("www.")
-                                    if parsed_link.scheme not in {"http", "https"} or not domain:
-                                        continue
-                                    if safe_domains and not _domain_matches(
-                                        domain, set(safe_domains)
-                                    ):
-                                        continue
-                                    platform_name = _platform_for_domain(domain)
-                                    snippet_node = result_node.select_one(".result__snippet")
-                                    snippet = (
-                                        snippet_node.get_text(" ", strip=True)
-                                        if snippet_node is not None
-                                        else ""
-                                    )
-                                    candidates.append(
-                                        {
-                                            "title": title,
-                                            "url": canonicalize_url(link),
-                                            "source": domain,
-                                            "source_domain": domain,
-                                            "published_at": None,
-                                            "date_unverified": True,
-                                            "snippet": snippet[:1000],
-                                            "language": language or "unknown",
-                                            "source_category": (
-                                                "社区平台"
-                                                if platform_name
-                                                else (
-                                                    "官方来源"
-                                                    if _domain_matches(
-                                                        domain, OFFICIAL_DOMAINS
-                                                    )
-                                                    else "联网网页"
-                                                )
-                                            ),
-                                            "provider": (
-                                                "duckduckgo_platform_search"
-                                                if platform_name
-                                                else "duckduckgo_web_search"
-                                            ),
-                                            "platform": platform_name,
-                                            "configured_trust": (
-                                                PLATFORM_TRUST_LEVELS[platform_name]
-                                                if platform_name
-                                                else None
-                                            ),
-                                        }
-                                    )
-                                    query_result_count += 1
-                                    if query_result_count >= per_query_limit:
-                                        break
-                    except (httpx.HTTPError, OSError, ValueError, TypeError) as exc:
-                        errors.append(
-                            f"web/duckduckgo: {type(exc).__name__}: {str(exc)[:160]}"
-                        )
-
-                platform_candidate_count = len(candidates) - web_candidates_before
-                if mode == "platform" and platform_candidate_count < limit:
-                    try:
-                        _validate_search_endpoint(context.settings.bing_search_url)
-                        search_query_text = _platform_search_query(query)
-                        bing_queries = [
-                            f"{search_query_text} site:{domain}" for domain in safe_domains
-                        ]
-                        async with httpx.AsyncClient(
-                            timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}
-                        ) as bing_client:
-                            semaphore = asyncio.Semaphore(4)
-
-                            async def fetch_bing_page(bing_query: str) -> httpx.Response:
-                                async with semaphore:
-                                    return await bing_client.get(
-                                        context.settings.bing_search_url,
-                                        params={"q": bing_query, "count": 15},
-                                    )
-
-                            bing_responses: list[Any] = await asyncio.gather(
-                                *(fetch_bing_page(query_text) for query_text in bing_queries),
-                                return_exceptions=True,
-                            )
-                            per_query_limit = max(
-                                2, math.ceil(limit / max(len(bing_queries), 1))
-                            )
-                            for response in bing_responses:
-                                if isinstance(response, BaseException):
-                                    errors.append(
-                                        "web/bing: "
-                                        f"{type(response).__name__}: {str(response)[:120]}"
-                                    )
-                                    continue
-                                try:
-                                    response.raise_for_status()
-                                except httpx.HTTPError as exc:
-                                    errors.append(
-                                        f"web/bing: {type(exc).__name__}: {str(exc)[:120]}"
-                                    )
-                                    continue
-                                response.encoding = "utf-8"
-                                soup = BeautifulSoup(response.text, "html.parser")
-                                query_result_count = 0
-                                for result_node in soup.select("li.b_algo"):
-                                    anchor = result_node.select_one("h2 a")
-                                    if anchor is None:
-                                        continue
-                                    title = anchor.get_text(" ", strip=True)
-                                    link = _decode_bing_result_url(
-                                        str(anchor.get("href", "")).strip()
-                                    )
-                                    parsed_link = urlsplit(link)
-                                    domain = parsed_link.netloc.lower().removeprefix("www.")
-                                    platform_name = _platform_for_domain(domain)
-                                    if (
-                                        parsed_link.scheme not in {"http", "https"}
-                                        or not domain
-                                        or platform_name is None
-                                    ):
-                                        continue
-                                    snippet_node = result_node.select_one(".b_caption p")
-                                    snippet = (
-                                        snippet_node.get_text(" ", strip=True)
-                                        if snippet_node is not None
-                                        else ""
-                                    )
-                                    candidates.append(
-                                        {
-                                            "title": title,
-                                            "url": canonicalize_url(link),
-                                            "source": domain,
-                                            "source_domain": domain,
-                                            "published_at": None,
-                                            "date_unverified": True,
-                                            "snippet": snippet[:1000],
-                                            "language": language or "unknown",
-                                            "source_category": "社区平台",
-                                            "provider": "bing_platform_search",
-                                            "platform": platform_name,
-                                            "configured_trust": PLATFORM_TRUST_LEVELS[
-                                                platform_name
-                                            ],
-                                        }
-                                    )
-                                    query_result_count += 1
-                                    if query_result_count >= per_query_limit:
-                                        break
-                    except (httpx.HTTPError, OSError, ValueError, TypeError) as exc:
-                        errors.append(f"web/bing: {type(exc).__name__}: {str(exc)[:160]}")
+        if searches and not searches_consumed:
+            remaining_results = await asyncio.gather(*searches)
+            for provider_result in remaining_results:
+                candidates.extend(provider_result.candidates)
+                errors.extend(provider_result.errors)
+                provider_metrics.append(provider_result.metric())
 
     unique: dict[str, dict[str, Any]] = {}
     for raw_item in candidates:
@@ -1061,6 +1130,7 @@ async def search_news(
         "total_unique_candidates": len(ranked),
         "candidates": ranked[:limit],
         "source_errors": errors,
+        "provider_metrics": provider_metrics,
         "verification_note": (
             "搜索结果只是发现线索；A级官方来源可直接引用，其他来源的重要事实应通过"
             "fetch_article 和至少一个独立来源交叉核验。"
@@ -1081,9 +1151,7 @@ async def _validate_public_url(url: str, allow_proxy_fake_ip: bool = False) -> N
             raise ValueError("URL resolves to a non-public address")
 
 
-async def fetch_article(
-    context: ToolContext, url: str, max_chars: int = 20000
-) -> dict[str, Any]:
+async def fetch_article(context: ToolContext, url: str, max_chars: int = 20000) -> dict[str, Any]:
     current_url = url
     timeout = httpx.Timeout(20.0, connect=8.0)
     async with httpx.AsyncClient(
@@ -1118,9 +1186,7 @@ async def fetch_article(
         or soup.find("meta", attrs={"name": "description"})
         or soup.find("meta", attrs={"name": "twitter:description"})
     )
-    description = (
-        str(description_meta.get("content", "")).strip() if description_meta else ""
-    )
+    description = str(description_meta.get("content", "")).strip() if description_meta else ""
     author_meta = soup.find("meta", attrs={"name": "author"})
     published_meta = (
         soup.find("meta", attrs={"property": "article:published_time"})

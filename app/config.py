@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     agent_max_tool_calls: int = Field(default=25, ge=1, le=100)
     agent_max_search_calls: int = Field(default=8, ge=1, le=30)
     agent_max_fetch_calls: int = Field(default=10, ge=1, le=50)
+    agent_fetch_concurrency: int = Field(default=4, ge=1, le=10)
     agent_reserved_final_calls: int = Field(default=2, ge=2, le=10)
     agent_search_target_candidates: int = Field(default=30, ge=3, le=100)
     agent_timeout_seconds: int = Field(default=300, ge=30, le=1800)
@@ -37,9 +38,7 @@ class Settings(BaseSettings):
     github_search_url: str = "https://api.github.com/search/repositories"
     reddit_search_url: str = "https://www.reddit.com/search.rss"
     twitterapi_api_key: str = ""
-    twitterapi_search_url: str = (
-        "https://api.twitterapi.io/twitter/tweet/advanced_search"
-    )
+    twitterapi_search_url: str = "https://api.twitterapi.io/twitter/tweet/advanced_search"
     allow_proxy_fake_ip: bool = False
 
     default_timezone: str = "Asia/Shanghai"
@@ -65,4 +64,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

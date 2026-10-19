@@ -132,8 +132,9 @@ uv run mypy app
 ## 配置
 
 运行配置位于 `.env`，示例字段见 `.env.example`。`.env` 已被 Git 忽略。
-默认 `WEB_SEARCH_PROVIDER=auto`，优先使用 GDELT DOC 新闻索引，结果不足、限流或超时时
-由 DuckDuckGo 与 Bing 补充；GitHub 和 Reddit 还会使用公开检索入口。
+默认 `WEB_SEARCH_PROVIDER=auto`，同一轮会并行使用 GDELT DOC 与 DuckDuckGo，平台检索不足时
+再由 Bing 补充；GitHub 和 Reddit 还会使用公开检索入口。连续正文抓取默认最多 4 个并发，
+可通过 `AGENT_FETCH_CONCURRENCY` 调整，但不会减少正文核验数量。
 `search_news` 支持 `hybrid`、`rss`、`web`、`official` 和 `platform` 五种模式。
 
 ### TwitterAPI.io 密钥

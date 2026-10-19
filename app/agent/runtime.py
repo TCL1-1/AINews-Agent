@@ -22,6 +22,14 @@ class AgentOutcome:
     stop_reason: str
 
 
+@dataclass(slots=True)
+class _ToolExecution:
+    result: dict[str, Any] | list[Any]
+    status: str
+    error_code: str | None
+    duration_ms: int
+
+
 def _redact(value: Any, key: str = "") -> Any:
     sensitive = ("password", "secret", "token", "api_key", "authorization")
     if any(part in key.lower() for part in sensitive):
@@ -33,6 +41,96 @@ def _redact(value: Any, key: str = "") -> Any:
     if isinstance(value, str) and len(value) > 2000:
         return value[:2000] + "…"
     return value
+
+
+def _audit_result_summary(
+    tool_name: str,
+    result: dict[str, Any] | list[Any],
+    max_chars: int = 2000,
+) -> str:
+    redacted = _redact(result)
+    if isinstance(redacted, dict):
+        summary_fields = {
+            "search_x_accounts": (
+                "provider",
+                "provider_status",
+                "requested_handles",
+                "handles_with_results",
+                "handles_without_results",
+                "count",
+                "source_errors",
+            ),
+            "search_news": (
+                "query",
+                "mode",
+                "count",
+                "total_unique_candidates",
+                "source_errors",
+                "provider_metrics",
+                "search_policy",
+            ),
+            "fetch_article": (
+                "url",
+                "canonical_url",
+                "title",
+                "source",
+                "published_at",
+                "content_hash",
+                "fetch_status",
+                "ok",
+                "error",
+                "error_type",
+            ),
+        }
+        fields = summary_fields.get(tool_name)
+        if fields:
+            redacted = {field: redacted[field] for field in fields if field in redacted}
+            for list_field in ("source_errors", "provider_metrics"):
+                value = redacted.get(list_field)
+                if isinstance(value, list):
+                    redacted[list_field] = value[:20]
+
+    serialized = json.dumps(redacted, ensure_ascii=False, default=str)
+    if len(serialized) <= max_chars:
+        return serialized
+    fallback = {
+        "truncated": True,
+        "tool_name": tool_name,
+        "result_type": type(result).__name__,
+        "keys": list(result)[:50] if isinstance(result, dict) else [],
+        "preview": serialized[:800],
+    }
+    return json.dumps(fallback, ensure_ascii=False, default=str)
+
+
+async def _execute_tool_batch(
+    registry: ToolRegistry,
+    context: ToolContext,
+    calls: list[tuple[str, dict[str, Any]]],
+    concurrency: int,
+) -> list[_ToolExecution]:
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def execute(name: str, arguments: dict[str, Any]) -> _ToolExecution:
+        started = datetime.now(UTC)
+        try:
+            async with semaphore:
+                result = await registry.execute(name, arguments, context)
+            status = "SUCCEEDED"
+            error_code = None
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+            status = "FAILED"
+            error_code = type(exc).__name__
+        finished = datetime.now(UTC)
+        return _ToolExecution(
+            result=result,
+            status=status,
+            error_code=error_code,
+            duration_ms=int((finished - started).total_seconds() * 1000),
+        )
+
+    return await asyncio.gather(*(execute(name, arguments) for name, arguments in calls))
 
 
 class AgentRuntime:
@@ -69,12 +167,8 @@ class AgentRuntime:
                         "total": self.settings.agent_max_tool_calls,
                         "search_news": self.settings.agent_max_search_calls,
                         "fetch_article": self.settings.agent_max_fetch_calls,
-                        "reserved_for_save_and_push": (
-                            self.settings.agent_reserved_final_calls
-                        ),
-                        "target_unique_candidates": (
-                            self.settings.agent_search_target_candidates
-                        ),
+                        "reserved_for_save_and_push": (self.settings.agent_reserved_final_calls),
+                        "target_unique_candidates": (self.settings.agent_search_target_candidates),
                     },
                     integrations={
                         "twitterapi_x_search": bool(self.settings.twitterapi_api_key),
@@ -116,8 +210,113 @@ class AgentRuntime:
                         stop_reason="completed",
                     )
 
-                for call in message.tool_calls:
+                tool_calls = list(message.tool_calls)
+                call_index = 0
+                while call_index < len(tool_calls):
+                    call = tool_calls[call_index]
                     name = call.function.name
+                    if name == "fetch_article":
+                        batch_end = call_index
+                        while (
+                            batch_end < len(tool_calls)
+                            and tool_calls[batch_end].function.name == "fetch_article"
+                        ):
+                            batch_end += 1
+                        batch_calls = tool_calls[call_index:batch_end]
+                        parsed_batch: list[tuple[Any, dict[str, Any], str]] = []
+                        batch_signature_counts: dict[str, int] = {}
+                        batch_arguments_valid = True
+                        for batch_call in batch_calls:
+                            try:
+                                batch_arguments = json.loads(batch_call.function.arguments or "{}")
+                                if not isinstance(batch_arguments, dict):
+                                    raise ValueError("tool arguments must be a JSON object")
+                            except (json.JSONDecodeError, ValueError):
+                                batch_arguments_valid = False
+                                break
+                            arguments_key = json.dumps(
+                                batch_arguments, ensure_ascii=False, sort_keys=True
+                            )
+                            batch_signature = f"fetch_article:{arguments_key}"
+                            batch_signature_counts[batch_signature] = (
+                                batch_signature_counts.get(batch_signature, 0) + 1
+                            )
+                            parsed_batch.append((batch_call, batch_arguments, batch_signature))
+
+                        remaining_calls = (
+                            self.settings.agent_max_tool_calls - self.run_record.tool_call_count
+                        )
+                        batch_within_budget = (
+                            len(batch_calls) > 1
+                            and len(batch_calls)
+                            <= remaining_calls - self.settings.agent_reserved_final_calls
+                            and tool_counts.get("fetch_article", 0) + len(batch_calls)
+                            <= self.settings.agent_max_fetch_calls
+                        )
+                        batch_without_duplicates = all(
+                            call_signatures.get(signature, 0) + count <= 2
+                            for signature, count in batch_signature_counts.items()
+                        )
+                        if (
+                            batch_arguments_valid
+                            and batch_within_budget
+                            and batch_without_duplicates
+                        ):
+                            prepared_batch: list[tuple[Any, dict[str, Any], ToolCall]] = []
+                            for batch_call, batch_arguments, batch_signature in parsed_batch:
+                                call_signatures[batch_signature] = (
+                                    call_signatures.get(batch_signature, 0) + 1
+                                )
+                                audit_sequence += 1
+                                batch_audit = ToolCall(
+                                    run_id=self.run_record.id,
+                                    sequence_number=audit_sequence,
+                                    tool_name="fetch_article",
+                                    arguments_redacted=_redact(batch_arguments),
+                                    status="RUNNING",
+                                )
+                                self.db.add(batch_audit)
+                                prepared_batch.append((batch_call, batch_arguments, batch_audit))
+                            self.db.commit()
+                            executions = await _execute_tool_batch(
+                                self.registry,
+                                self.context,
+                                [
+                                    ("fetch_article", batch_arguments)
+                                    for _, batch_arguments, _ in prepared_batch
+                                ],
+                                self.settings.agent_fetch_concurrency,
+                            )
+                            for prepared, execution in zip(prepared_batch, executions, strict=True):
+                                batch_call, _, batch_audit = prepared
+                                batch_audit.status = execution.status
+                                batch_audit.error_code = execution.error_code
+                                batch_audit.finished_at = datetime.now(UTC)
+                                batch_audit.duration_ms = execution.duration_ms
+                                batch_audit.result_summary = _audit_result_summary(
+                                    "fetch_article", execution.result
+                                )
+                                if execution.status == "SUCCEEDED":
+                                    tool_counts["fetch_article"] = (
+                                        tool_counts.get("fetch_article", 0) + 1
+                                    )
+                                self.run_record.tool_call_count += 1
+                                serialized = json.dumps(
+                                    execution.result,
+                                    ensure_ascii=False,
+                                    default=str,
+                                )
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": batch_call.id,
+                                        "content": serialized[:30000],
+                                    }
+                                )
+                            self.db.commit()
+                            call_index = batch_end
+                            continue
+
                     try:
                         arguments = json.loads(call.function.arguments or "{}")
                         if not isinstance(arguments, dict):
@@ -134,6 +333,7 @@ class AgentRuntime:
                                 "content": json.dumps(result, ensure_ascii=False),
                             }
                         )
+                        call_index += 1
                         continue
 
                     remaining_calls = (
@@ -144,8 +344,7 @@ class AgentRuntime:
                         name == "save_digest"
                         and require_twitterapi_x_search
                         and not twitterapi_x_search_used
-                        and tool_counts.get("search_news", 0)
-                        < self.settings.agent_max_search_calls
+                        and tool_counts.get("search_news", 0) < self.settings.agent_max_search_calls
                         and remaining_calls > self.settings.agent_reserved_final_calls
                     ):
                         policy_error = (
@@ -294,7 +493,7 @@ class AgentRuntime:
                     audit.finished_at = finished
                     audit.duration_ms = int((finished - started).total_seconds() * 1000)
                     serialized = json.dumps(result, ensure_ascii=False, default=str)
-                    audit.result_summary = serialized[:2000]
+                    audit.result_summary = _audit_result_summary(name, result)
                     if not policy_error:
                         self.run_record.tool_call_count += 1
                     self.db.commit()
@@ -305,5 +504,6 @@ class AgentRuntime:
                             "content": serialized[:30000],
                         }
                     )
+                    call_index += 1
 
         raise RuntimeError("Agent exceeded the maximum number of model rounds")
