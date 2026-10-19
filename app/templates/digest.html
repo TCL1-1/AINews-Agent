@@ -19,13 +19,6 @@
           <p class="reason"><strong>为何值得关注：</strong>{{ item.recommendation_reason }}</p>
           <div class="news-footer">
             <span>相关度 {{ '%.0f'|format(item.relevance_score) }}</span>
-            <form method="post" action="/feedback" class="inline-form">
-              <input type="hidden" name="csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="article_id" value="{{ item.article_id }}">
-              <input type="hidden" name="digest_id" value="{{ digest.id }}">
-              <button name="feedback_type" value="bookmark" type="submit">收藏</button>
-              <button name="feedback_type" value="not_interested" type="submit">不感兴趣</button>
-            </form>
           </div>
         </article>
       {% endfor %}
