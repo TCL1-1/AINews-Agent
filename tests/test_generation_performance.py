@@ -26,6 +26,31 @@ class _FakeDb:
         return _EmptyScalars()
 
 
+class _ConfiguredScalars:
+    def __init__(self, rows: list[object]) -> None:
+        self.rows = rows
+
+    def all(self) -> list[object]:
+        return self.rows
+
+
+class _ConfiguredDb:
+    def __init__(self, count: int) -> None:
+        self.rows = [
+            SimpleNamespace(
+                name=f"Feed {index}",
+                base_url=f"https://feed-{index}.example/rss",
+                language="en",
+                category="LLM 与 AI Agent",
+                trust_level=4,
+            )
+            for index in range(count)
+        ]
+
+    def scalars(self, _query: object) -> _ConfiguredScalars:
+        return _ConfiguredScalars(self.rows)
+
+
 class _SearchResponse:
     def __init__(self, url: str) -> None:
         self.url = url
@@ -102,6 +127,25 @@ async def test_rss_sources_run_concurrently_and_report_metrics(
     assert _ConcurrentSearchClient.max_active == 5
     assert len(result["provider_metrics"]) == 5
     assert all(metric["provider"].startswith("rss/") for metric in result["provider_metrics"])
+
+
+@pytest.mark.asyncio
+async def test_rss_source_concurrency_remains_bounded_when_feeds_expand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.tools.news.httpx.AsyncClient", _ConcurrentSearchClient)
+    context = SimpleNamespace(db=_ConfiguredDb(12), settings=SimpleNamespace())
+
+    result = await search_news(
+        context,  # type: ignore[arg-type]
+        query="AI Agent",
+        start_time="2026-10-15T00:00:00Z",
+        end_time="2026-10-17T00:00:00Z",
+        mode="rss",
+    )
+
+    assert _ConcurrentSearchClient.max_active == 5
+    assert len(result["provider_metrics"]) == 12
 
 
 @pytest.mark.asyncio

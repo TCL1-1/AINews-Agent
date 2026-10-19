@@ -58,6 +58,7 @@ DEFAULT_FEEDS = [
 ]
 
 USER_AGENT = "AINewsAgent/0.1 (+local personal digest)"
+RSS_CONCURRENCY = 5
 
 # A 级来源可以作为单一官方证据；B 级来源适合与官方材料或另一家独立媒体交叉验证。
 OFFICIAL_DOMAINS = {
@@ -649,8 +650,10 @@ async def _search_rss_feed(
     terms: list[str],
     start: datetime,
     end: datetime,
+    semaphore: asyncio.Semaphore,
 ) -> list[dict[str, Any]]:
-    response = await client.get(feed["url"])
+    async with semaphore:
+        response = await client.get(feed["url"])
     response.raise_for_status()
     parsed = feedparser.parse(response.content)
     candidates: list[dict[str, Any]] = []
@@ -969,11 +972,21 @@ async def search_news(
     async with httpx.AsyncClient(timeout=timeout, headers={"User-Agent": USER_AGENT}) as client:
         searches: list[Awaitable[_ProviderResult]] = []
         searches_consumed = False
+        rss_semaphore = asyncio.Semaphore(RSS_CONCURRENCY)
         if mode in {"hybrid", "rss"}:
             searches.extend(
                 _timed_provider(
                     f"rss/{feed['name']}",
-                    _candidate_operation(_search_rss_feed(client, feed, terms, start, end)),
+                    _candidate_operation(
+                        _search_rss_feed(
+                            client,
+                            feed,
+                            terms,
+                            start,
+                            end,
+                            rss_semaphore,
+                        )
+                    ),
                 )
                 for feed in feeds
             )
