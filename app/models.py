@@ -60,6 +60,7 @@ class PreferenceProfile(TimestampMixin, Base):
     excluded_keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
     languages: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["zh", "en"])
     source_preferences: Mapped[list[str]] = mapped_column(JSON, default=list)
+    x_accounts: Mapped[list[str]] = mapped_column(JSON, default=list)
     max_items: Mapped[int] = mapped_column(Integer, default=10)
     coverage_hours: Mapped[int] = mapped_column(Integer, default=24)
     schedule_time: Mapped[time] = mapped_column(Time, default=time(8, 0))

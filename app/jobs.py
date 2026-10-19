@@ -25,6 +25,7 @@ def preference_snapshot(user: User, preference: PreferenceProfile | None) -> dic
         "excluded_keywords": preference.excluded_keywords if preference else [],
         "languages": preference.languages if preference else ["zh", "en"],
         "source_preferences": preference.source_preferences if preference else [],
+        "x_accounts": preference.x_accounts if preference else [],
         "max_items": preference.max_items if preference else settings.default_max_items,
         "coverage_hours": (
             preference.coverage_hours if preference else settings.default_coverage_hours

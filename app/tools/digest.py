@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import smtplib
 from datetime import UTC, datetime
 from email.message import EmailMessage
@@ -8,16 +9,90 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.models import (
+    AgentRun,
     Article,
     Delivery,
     DeliveryChannel,
     Digest,
     DigestItem,
     PreferenceProfile,
+    ToolCall,
 )
 from app.normalization import canonicalize_url, normalize_title, stable_hash
 from app.schemas import DigestDraft
 from app.tools.registry import ToolContext
+from app.tools.x_accounts import normalize_x_handles
+
+
+def _x_handle_from_url(url: str) -> str | None:
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    if parsed.netloc.lower().removeprefix("www.") not in {"x.com", "twitter.com"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 3 or parts[1].lower() != "status":
+        return None
+    try:
+        return normalize_x_handles([parts[0]])[0].lower()
+    except (ValueError, IndexError):
+        return None
+
+
+def _enforce_x_watchlist(context: ToolContext, draft: DigestDraft) -> None:
+    run = context.db.get(AgentRun, context.run_id)
+    snapshot = run.preference_snapshot if run and isinstance(run.preference_snapshot, dict) else {}
+    raw_accounts = snapshot.get("x_accounts", [])
+    configured = normalize_x_handles(raw_accounts if isinstance(raw_accounts, list) else [])
+    if not configured:
+        return
+
+    calls = context.db.scalars(
+        select(ToolCall)
+        .where(
+            ToolCall.run_id == context.run_id,
+            ToolCall.tool_name == "search_x_accounts",
+            ToolCall.status == "SUCCEEDED",
+        )
+        .order_by(ToolCall.sequence_number)
+    ).all()
+    if not calls:
+        raise ValueError("X 关注账号尚未检索；保存前必须调用 search_x_accounts，并传入完整账号列表")
+
+    requested: set[str] = set()
+    handles_with_results: set[str] = set()
+    for call in calls:
+        try:
+            result = json.loads(call.result_summary or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(result, dict):
+            continue
+        requested.update(str(item).lower() for item in result.get("requested_handles", []))
+        handles_with_results.update(
+            str(item).lower() for item in result.get("handles_with_results", [])
+        )
+
+    missing_searches = [handle for handle in configured if handle.lower() not in requested]
+    if missing_searches:
+        names = "、".join(f"@{handle}" for handle in missing_searches)
+        raise ValueError(f"以下 X 关注账号尚未通过 TwitterAPI 检索：{names}")
+
+    selected_handles = {
+        handle
+        for item in draft.items
+        for handle in (
+            _x_handle_from_url(str(item.original_url)),
+            _x_handle_from_url(str(item.canonical_url)),
+        )
+        if handle
+    }
+    missing_items = [
+        handle for handle in configured if handle.lower() in handles_with_results - selected_handles
+    ]
+    if missing_items:
+        names = "、".join(f"@{handle}" for handle in missing_items)
+        raise ValueError(f"以下有新内容的 X 关注账号尚未纳入简报：{names}")
 
 
 def save_digest(context: ToolContext, digest: dict[str, Any]) -> dict[str, Any]:
@@ -32,6 +107,7 @@ def save_digest(context: ToolContext, digest: dict[str, Any]) -> dict[str, Any]:
         }
 
     draft = DigestDraft.model_validate(digest)
+    _enforce_x_watchlist(context, draft)
     preference = context.db.scalar(
         select(PreferenceProfile).where(PreferenceProfile.user_id == context.user_id)
     )

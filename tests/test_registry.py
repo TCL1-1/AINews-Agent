@@ -1,7 +1,7 @@
 from app.tools import build_tool_registry
 
 
-def test_registry_contains_exactly_ten_tools() -> None:
+def test_registry_contains_expected_tools() -> None:
     registry = build_tool_registry()
     assert registry.names == [
         "list_dir",
@@ -10,6 +10,7 @@ def test_registry_contains_exactly_ten_tools() -> None:
         "write_file",
         "bash",
         "search_news",
+        "search_x_accounts",
         "fetch_article",
         "query_news_history",
         "save_digest",

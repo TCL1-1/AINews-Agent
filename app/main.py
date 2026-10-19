@@ -20,6 +20,7 @@ from app.database import SessionLocal, get_db, init_db
 from app.jobs import create_job, run_job_sync
 from app.models import AgentRun, Digest, DigestJob, PreferenceProfile, User, UserFeedback
 from app.seed import seed_sources
+from app.tools.x_accounts import normalize_x_handles
 
 settings = get_settings()
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
@@ -207,6 +208,9 @@ def update_preferences(
     topics: str = Form(""),
     keywords: str = Form(""),
     excluded_keywords: str = Form(""),
+    x_account_1: str = Form(""),
+    x_account_2: str = Form(""),
+    x_account_3: str = Form(""),
     max_items: int = Form(10),
     coverage_hours: int = Form(24),
     schedule_time: str = Form("08:00"),
@@ -228,6 +232,10 @@ def update_preferences(
     preference.topics = split_values(topics)
     preference.keywords = split_values(keywords)
     preference.excluded_keywords = split_values(excluded_keywords)
+    try:
+        preference.x_accounts = normalize_x_handles([x_account_1, x_account_2, x_account_3])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     preference.max_items = min(max(max_items, 3), 30)
     preference.coverage_hours = min(max(coverage_hours, 6), 168)
     preference.schedule_time = schedule

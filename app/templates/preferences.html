@@ -21,6 +21,21 @@
       <textarea name="excluded_keywords" rows="3">{{ preference.excluded_keywords|join('，') }}</textarea>
     </label>
   </div>
+  <section class="settings-section">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">X WATCHLIST</p>
+        <h2>X 账号关注</h2>
+      </div>
+    </div>
+    <p class="muted">最多填写 3 个账号。可输入 <code>@sama</code>、<code>sama</code> 或完整的 X 主页链接；系统会优先检索这些账号在简报覆盖时段内发布的原创内容。</p>
+    <div class="three-column">
+      <label>X 账号 1<input name="x_account_1" value="{{ preference.x_accounts[0]|default('') }}" placeholder="@sama" autocomplete="off"></label>
+      <label>X 账号 2<input name="x_account_2" value="{{ preference.x_accounts[1]|default('') }}" placeholder="@karpathy" autocomplete="off"></label>
+      <label>X 账号 3<input name="x_account_3" value="{{ preference.x_accounts[2]|default('') }}" placeholder="@AndrewYNg" autocomplete="off"></label>
+    </div>
+    <small>有时效内结果的账号至少会在简报中保留 1 条；没有新帖、API 不可用或内容无法核验时会在简报警告中说明。</small>
+  </section>
   <div class="three-column">
     <label>每天生成时间<input type="time" name="schedule_time" value="{{ preference.schedule_time.strftime('%H:%M') }}"></label>
     <label>覆盖时长（小时）<input type="number" min="6" max="168" name="coverage_hours" value="{{ preference.coverage_hours }}"></label>

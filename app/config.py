@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     agent_max_tool_calls: int = Field(default=25, ge=1, le=100)
     agent_timeout_seconds: int = Field(default=300, ge=30, le=1800)
 
+    twitterapi_api_key: str = ""
+    twitterapi_search_url: str = (
+        "https://api.twitterapi.io/twitter/tweet/advanced_search"
+    )
     default_timezone: str = "Asia/Shanghai"
     default_digest_hour: int = Field(default=8, ge=0, le=23)
     default_digest_minute: int = Field(default=0, ge=0, le=59)

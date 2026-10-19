@@ -82,6 +82,7 @@ def build_tool_registry() -> ToolRegistry:
     from app.tools.digest import push_digest, save_digest
     from app.tools.filesystem import bash, list_dir, read_file, search_content, write_file
     from app.tools.news import fetch_article, query_news_history, search_news
+    from app.tools.x_accounts import search_x_accounts
 
     registry = ToolRegistry()
     digest_schema = DigestDraft.model_json_schema()
@@ -157,6 +158,36 @@ def build_tool_registry() -> ToolRegistry:
                 ["query", "start_time", "end_time"],
             ),
             search_news,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            "search_x_accounts",
+            (
+                "通过 TwitterAPI.io Advanced Search 逐个检索用户配置的 X 关注账号。"
+                "handles 必须来自 preferences.x_accounts；有候选的账号需至少选入一条简报。"
+            ),
+            object_schema(
+                {
+                    "handles": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": True,
+                    },
+                    "start_time": {"type": "string", "format": "date-time"},
+                    "end_time": {"type": "string", "format": "date-time"},
+                    "limit_per_account": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 5,
+                    },
+                },
+                ["handles", "start_time", "end_time"],
+            ),
+            search_x_accounts,
         )
     )
     registry.register(
