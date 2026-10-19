@@ -14,21 +14,6 @@
 {% elif job.status == 'FAILED' %}
   <div class="alert"><strong>{{ job.error_code or '运行失败' }}</strong><br>{{ job.error_message }}</div>
 {% endif %}
-{% if run %}
-  <section>
-    <div class="section-heading"><h2>工具调用时间线</h2><span>{{ run.tool_call_count }} 次</span></div>
-    <div class="timeline">
-      {% for call in run.tool_calls %}
-        <div class="news-card">
-          <div class="news-meta"><span>#{{ call.sequence_number }}</span><strong>{{ call.tool_name }}</strong><span>{{ call.status }}</span><span>{{ call.duration_ms or 0 }} ms</span></div>
-          {% if call.status == 'FAILED' %}<p class="alert">{{ call.result_summary }}</p>{% endif %}
-        </div>
-      {% else %}
-        <p class="empty">尚无工具调用记录。</p>
-      {% endfor %}
-    </div>
-  </section>
-{% endif %}
 <p><a href="/">← 返回首页</a></p>
 {% endblock %}
 
