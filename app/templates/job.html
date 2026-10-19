@@ -8,7 +8,7 @@
   <p class="muted">类型 {{ job.job_type }} · 已尝试 {{ job.attempt_count }} 次</p>
 </section>
 {% if job.status in ['PENDING', 'RUNNING'] %}
-  <div class="progress-card"><div class="spinner"></div><div><h3>Agent 正在自主执行</h3><p>搜索、读取、核验、去重和工具调用可能需要几分钟。本页每 5 秒刷新。</p></div></div>
+  <div class="progress-card"><div class="spinner"></div><div><h3>Agent 正在后台执行</h3><p>搜索、读取、核验、去重和工具调用可能需要几分钟。你可以切换到其他页面，任务不会中断；返回概览后点击“返回生成页面”即可查看进度。</p></div></div>
 {% elif job.status == 'SUCCEEDED' and digest %}
   <div class="success"><strong>简报已经生成。</strong> <a href="/digests/{{ digest.id }}">查看简报 →</a></div>
 {% elif job.status == 'FAILED' %}

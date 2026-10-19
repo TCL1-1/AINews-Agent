@@ -75,6 +75,18 @@ def redirect_login() -> RedirectResponse:
     return RedirectResponse("/login", status_code=303)
 
 
+def get_active_job(db: Session, user_id: int) -> DigestJob | None:
+    return db.scalar(
+        select(DigestJob)
+        .where(
+            DigestJob.user_id == user_id,
+            DigestJob.status.in_(["PENDING", "RUNNING"]),
+        )
+        .order_by(DigestJob.created_at.desc(), DigestJob.id.desc())
+        .limit(1)
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "app": settings.app_name}
@@ -85,6 +97,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)) -> Response:
     user = current_user(request, db)
     if user is None:
         return redirect_login()
+    active_job = get_active_job(db, user.id)
     digests = db.scalars(
         select(Digest)
         .where(Digest.user_id == user.id)
@@ -100,7 +113,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)) -> Response:
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        context(request, db, digests=digests, jobs=jobs),
+        context(request, db, digests=digests, jobs=jobs, active_job=active_job),
     )
 
 
@@ -258,11 +271,7 @@ def run_now(
     user = current_user(request, db)
     if user is None:
         return redirect_login()
-    running = db.scalar(
-        select(DigestJob).where(
-            DigestJob.user_id == user.id, DigestJob.status.in_(["PENDING", "RUNNING"])
-        )
-    )
+    running = get_active_job(db, user.id)
     job = running or create_job(user.id)
     if running is None:
         background.add_task(run_job_sync, job.id)

@@ -8,7 +8,7 @@
   </div>
   <form method="post" action="/run-now">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
-    <button class="primary" type="submit">立即生成简报</button>
+    <button class="primary" type="submit">{% if active_job %}返回生成页面{% else %}立即生成简报{% endif %}</button>
   </form>
 </section>
 
