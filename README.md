@@ -19,40 +19,113 @@ DeepSeek 模型会自主决定工具调用顺序，搜索、读取、去重并�
 - 手动生成、每日调度、历史简报和用户反馈
 - SQLite 本地运行与 PostgreSQL Docker Compose 配置
 
-## 本地启动（Windows PowerShell）
+## 运行前提
 
-项目已经创建 `.venv`。安装依赖：
+- Git。
+- Python 3.12 或更高版本。
+- 能访问所配置的大模型与新闻来源；生成简报必须配置 DeepSeek API Key。
+- 推荐安装 `uv` 并使用仓库中的 `uv.lock` 还原依赖；也可以使用标准 `venv + pip`。
+- 使用容器部署时，只需要 Docker Engine（或 Docker Desktop）和 Docker Compose。
+
+## 从全新克隆开始（Windows PowerShell）
+
+### 1. 克隆并安装依赖
+
+在 GitHub 仓库页面复制克隆地址，然后执行：
 
 ```powershell
+git clone <repository-url>
+Set-Location AINews-Agent
+Copy-Item .env.example .env
+New-Item -ItemType Directory -Force data,runtime | Out-Null
+uv sync --frozen --extra dev
+```
+
+没有安装 `uv` 时可以改用：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-初始化数据库迁移：
+### 2. 配置环境变量
 
-```powershell
-.\.venv\Scripts\alembic.exe upgrade head
+编辑根目录中的 `.env`，至少完成以下两项：
+
+```dotenv
+DEEPSEEK_API_KEY=你的_deepseek_api_key
+APP_SECRET_KEY=随机长字符串
 ```
 
-启动 Web：
+可以用下面的命令生成 `APP_SECRET_KEY`：
 
 ```powershell
+uv run python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+未配置 `DEEPSEEK_API_KEY` 时，注册、登录和页面浏览仍可使用，但生成简报会失败。开发环境默认
+使用 `data/ai_news.db` 中的 SQLite 数据库；不要把 `.env`、数据库或运行日志提交到 Git。
+
+### 3. 初始化数据库并启动
+
+首次安装以及每次拉取包含数据库迁移的更新后，都应先运行：
+
+```powershell
+uv run alembic upgrade head
+```
+
+启动 Web 服务：
+
+```powershell
+uv run uvicorn app.main:app --reload
+```
+
+访问 <http://127.0.0.1:8000>，注册账户、保存偏好后点击“立即生成简报”。可用以下命令检查
+服务是否存活：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+预期返回 `status` 为 `ok` 的 JSON。手动生成简报不依赖独立调度器；如需按照用户设置的时间
+自动生成，请另开一个终端并保持下列进程运行：
+
+```powershell
+uv run python -m app.scheduler
+```
+
+如果使用的是 `venv + pip`，对应命令如下：
+
+```powershell
+.\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
-```
-
-另开终端启动调度器：
-
-```powershell
 .\.venv\Scripts\python.exe -m app.scheduler
 ```
 
-访问 <http://127.0.0.1:8000>，注册账户、保存偏好后点击“立即生成简报”。
+### macOS / Linux 命令差异
+
+除创建环境文件和目录外，其余 `uv` 命令与 Windows 相同：
+
+```bash
+cp .env.example .env
+mkdir -p data runtime
+uv sync --frozen --extra dev
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload
+```
 
 ## 测试和检查
 
+提交代码前运行完整测试、静态检查和类型检查：
+
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m ruff check .
+uv run pytest
+uv run ruff check .
+uv run mypy app
 ```
+
+测试默认使用本地模拟或隔离数据，不要求配置真实的 DeepSeek、TwitterAPI.io 或 SMTP 密钥。
 
 ## 配置
 
@@ -64,10 +137,64 @@ DeepSeek 模型会自主决定工具调用顺序，搜索、读取、去重并�
 - 配置 HTTPS、PostgreSQL 和可靠的邮件服务。
 - 根据用途确认新闻来源条款和抓取策略。
 
-## Docker Compose
+## Docker Compose 部署
+
+Compose 会启动 PostgreSQL、Web 和独立调度器。首次启动前同样需要从示例创建 `.env`，并填写
+`DEEPSEEK_API_KEY` 与随机的 `APP_SECRET_KEY`。
 
 ```powershell
-docker compose up --build
+Copy-Item .env.example .env
+docker compose build
+docker compose up -d db
+docker compose run --rm web alembic upgrade head
+docker compose up -d web scheduler
+docker compose ps
+Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-Compose 会启动 PostgreSQL、Web 和独立调度器。生产环境应使用秘密管理替代明文 `.env`。
+查看日志和停止服务：
+
+```powershell
+docker compose logs -f web scheduler
+docker compose down
+```
+
+`docker compose down` 会保留 PostgreSQL 命名卷。不要在需要保留数据时使用
+`docker compose down -v`，因为它会删除数据库卷。
+
+拉取新版本后的推荐升级顺序：
+
+```powershell
+git pull
+docker compose stop web scheduler
+docker compose build
+docker compose run --rm web alembic upgrade head
+docker compose up -d web scheduler
+```
+
+当前 Compose 文件中的数据库账号和密码只适合本机开发。公网或正式部署还需要反向代理与
+HTTPS、强数据库密码、秘密管理、备份和日志监控；不要直接把 8000 端口暴露到公网。
+
+## 常见问题
+
+- `unable to open database file`：确认已经创建 `data` 目录，并且当前用户有写权限。
+- `DEEPSEEK_API_KEY is not configured`：在 `.env` 中填写密钥后重启 Web 和调度器。
+- 登录后立即回到登录页：本地运行保持 `APP_ENV=development`；`production` 会要求 HTTPS
+  Session Cookie。
+- 抓取全部失败：检查外网、代理和 DNS。仅在 Clash/TUN Fake-IP 场景按上文说明开启
+  `ALLOW_PROXY_FAKE_IP`。
+- 定时任务不执行：确认 `app.scheduler` 进程或 Compose 的 `scheduler` 服务正在运行。
+
+## 推送 GitHub 前检查
+
+```powershell
+git status --short
+git check-ignore .env data/ai_news.db
+uv run pytest
+uv run ruff check .
+uv run mypy app
+```
+
+确认 `.env`、本地数据库、`runtime/` 内容、缓存和真实 API Key 均未进入待提交文件，再推送到
+GitHub。首次发布者需要先创建远程仓库并按 GitHub 页面提示添加 `origin`；从 GitHub 克隆的用户
+会自动获得该远程地址，无需重复添加。
